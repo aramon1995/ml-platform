@@ -33,3 +33,14 @@ def test_predict_ignores_extra_columns_and_rejects_missing_used_ones(fitted):
     assert len(out) == len(X) and set(out["features"][0]) == {"Timestamp", "F22", "F17"}
     with pytest.raises(ValueError, match="F22"):
         predict(model, X.drop(columns=["F22"]))
+
+
+def test_inline_rows_predict_with_nulls_and_missing_unused_columns(fitted):
+    from mlplatform.inference import load_batch
+
+    model, _ = fitted
+    X, source = load_batch(rows=[{"Timestamp": "2025-04-10 12:00:00", "F22": 20.0, "F17": None, "Target": "B"}])
+    assert source == "inline" and "Target" not in X
+    assert predict(model, X)["predicted_value"].tolist() == ["B"]
+    with pytest.raises(ValueError, match="either"):
+        load_batch("s3://data/x.csv", [{"F22": 1.0}])

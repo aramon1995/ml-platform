@@ -40,6 +40,7 @@ make select                              # champion por modelo y modelo de produ
 make train-select                        # train + select en un paso (admite los mismos parametros que train)
 make infer                               # lote por defecto: el split de test
 make infer INPUT=s3://data/inference/lote.csv
+make infer ROWS='[{"Timestamp": "2025-04-10 12:00:00", "F22": 18.5, "F17": null}]'   # filas sueltas, sin S3
 make eda                                 # re-ejecuta lab/eda.ipynb (desde el host)
 make test                                # tests unitarios
 make stop                                # para los servicios
@@ -49,6 +50,8 @@ make clean                               # para y borra los volúmenes (datos, r
 Los comandos `train`, `select` e `infer` lanzan el deployment de Prefect y esperan a que termine. También se pueden lanzar desde la UI de Prefect (*Deployments*). El reentrenamiento diario (`train-and-select`, 03:00) está definido pero desactivado: se activa desde la UI.
 
 Para subir un lote de inferencia: `uv run python -m mlplatform.storage upload lote.csv s3://data/inference/lote.csv`. El lote solo necesita las columnas que usa el modelo de producción; cualquier otra (incluida `Target`) se ignora.
+
+Para predecir unas pocas filas sin subir un CSV, se pasan en JSON con `ROWS` (también desde la UI de Prefect, parámetro `rows`). Cada fila debe incluir las columnas del feature set del modelo de producción; si falta alguna, la predicción falla indicando cuáles. Estas predicciones se guardan igual que las de un lote, con `input_uri = 'inline'`. No es inferencia en tiempo real: cada llamada crea un flow run y carga el modelo, unos segundos.
 
 ## Flujo
 
@@ -68,6 +71,7 @@ El núcleo es Python plano y no depende de Prefect. Para pruebas rápidas desde 
 uv run --env-file .env python -m mlplatform.tuning svm --features reduced_set --trials 5
 uv run --env-file .env python -m mlplatform.selection
 uv run --env-file .env python -m mlplatform.inference [s3://data/inference/lote.csv]
+uv run --env-file .env python -m mlplatform.inference --rows '[{"Timestamp": "2025-04-10 12:00:00", "F22": 18.5}]'
 ```
 
 `--env-file .env` es necesario para la inferencia. Lo que pueda acabar en producción conviene entrenarlo por Prefect, que usa el mismo código que luego sirve el modelo.
@@ -164,7 +168,7 @@ Solo compiten los estudios con la **clave de evaluación** actual: mismos datos,
 | `prediction_id`, `timestamp`, `predicted_value` | Base |
 | `probabilities` | Probabilidad por clase (JSONB) |
 | `model_name`, `model_version`, `model_family`, `feature_set`, `run_id` | Qué modelo predijo |
-| `batch_id`, `input_uri` | De qué lote viene |
+| `batch_id`, `input_uri` | De qué lote viene (`inline` si las filas se pasaron directamente) |
 | `features` | Valores de entrada que usó el modelo (JSONB) |
 
 ```bash

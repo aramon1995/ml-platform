@@ -37,9 +37,9 @@ def train_and_select(
 
 
 @flow(name="batch-inference")
-def batch_inference(input_uri: str | None = None) -> str:
-    """Predict an S3 batch with classifier@production and store it in Postgres."""
-    return inference.batch_inference(input_uri)
+def batch_inference(input_uri: str | None = None, rows: list[dict] | None = None) -> str:
+    """Predict an S3 batch (`input_uri`) or inline rows with classifier@production and store them in Postgres."""
+    return inference.batch_inference(input_uri, rows)
 
 
 if __name__ == "__main__":

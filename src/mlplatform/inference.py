@@ -1,6 +1,7 @@
 """Batch inference with the production model; predictions go to Postgres, a summary to MLflow."""
 
 import argparse
+import json
 import uuid
 
 import mlflow
@@ -42,9 +43,13 @@ def load_production():
     return mlflow.sklearn.load_model(f"models:/{PRODUCTION_MODEL}/{version.version}"), version
 
 
-def load_batch(input_uri: str | None) -> tuple[pd.DataFrame, str]:
-    """Raw rows from S3; without input, the test split is the sample batch."""
+def load_batch(input_uri: str | None = None, rows: list[dict] | None = None) -> tuple[pd.DataFrame, str]:
+    """Raw rows from S3 (`input_uri`) or passed inline (`rows`); without either, the test split is the sample batch."""
     s = get_settings()
+    if input_uri and rows:
+        raise ValueError("pass either input_uri or rows, not both")
+    if rows:
+        return pd.DataFrame(rows).drop(columns=[s.target], errors="ignore"), "inline"
     if input_uri:
         return read_csv(input_uri).drop(columns=[s.target], errors="ignore"), input_uri
     X, y = features_target(load_dataset())
@@ -73,11 +78,11 @@ def store(results: pd.DataFrame) -> None:
         conn.execute(predictions.insert(), results.to_dict("records"))
 
 
-def batch_inference(input_uri: str | None = None) -> str:
+def batch_inference(input_uri: str | None = None, rows: list[dict] | None = None) -> str:
     s = get_settings()
     mlflow.set_tracking_uri(s.mlflow_tracking_uri)
     model, version = load_production()
-    X, source = load_batch(input_uri)
+    X, source = load_batch(input_uri, rows)
     batch_id = uuid.uuid4().hex
     results = predict(model, X).assign(
         model_name=PRODUCTION_MODEL,
@@ -101,6 +106,8 @@ def batch_inference(input_uri: str | None = None) -> str:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Predict a batch with classifier@production and store it in Postgres")
+    parser = argparse.ArgumentParser(description="Predict with classifier@production and store the results in Postgres")
     parser.add_argument("input_uri", nargs="?", help="s3://... CSV; defaults to the test split")
-    print(batch_inference(parser.parse_args().input_uri))
+    parser.add_argument("--rows", type=json.loads, help='inline JSON rows, e.g. \'[{"Timestamp": "2025-04-10", "F22": 18.5}]\'')
+    args = parser.parse_args()
+    print(batch_inference(args.input_uri, args.rows))
