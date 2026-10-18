@@ -54,6 +54,17 @@ Para subir un lote de inferencia: `uv run python -m mlplatform.storage upload lo
 
 Para predecir unas pocas filas sin subir un CSV, se pasan en JSON con `ROWS` (también desde la UI de Prefect, parámetro `rows`). Cada fila debe incluir las columnas del feature set del modelo de producción; si falta alguna, la predicción falla indicando cuáles. Estas predicciones se guardan igual que las de un lote, con `input_uri = 'inline'`. No es inferencia en tiempo real: cada llamada crea un flow run y carga el modelo, unos segundos.
 
+## Arquitectura
+
+![Arquitectura de despliegue](diagrams/assets/platform-architecture.png)
+
+Servicios de docker compose y cómo se comunican: Prefect ejecuta los flows, MLflow guarda runs y modelos (metadatos en Postgres, artefactos en S3), la API sirve el modelo de producción en memoria y todas las predicciones acaban en Postgres.
+
+![Flujo de datos](diagrams/assets/ml-dataflow.png)
+
+Recorrido de los datos desde el dataset en S3 hasta las predicciones: entrenamiento con Optuna, tracking en MLflow, selección del modelo de producción e inferencia por lotes o por la API.
+
+Las versiones interactivas (zoom, búsqueda, tema oscuro, exportación a SVG/PNG) están en [`diagrams/platform-architecture.html`](diagrams/platform-architecture.html) y [`diagrams/ml-dataflow.html`](diagrams/ml-dataflow.html); se abren directamente en el navegador. Se generan con Archify.
 ## Flujo
 
 ```plain
@@ -65,6 +76,50 @@ selection.py           champion por modelo → producción (regla 1-SE + complej
 inference.py           lote de S3 → classifier@production → Postgres
 api.py                 API online con classifier@production en memoria → Postgres
 flows.py               flows de Prefect sobre las piezas anteriores
+```
+
+```mermaid
+flowchart TD
+    seed["make start / make seed<br/>data.csv → s3://data/raw/data.csv"] --> eda["lab/eda.ipynb (solo train)<br/>conclusiones → feature sets en features.py"]
+
+    subgraph TRAIN["Entrenamiento · flow train (por modelo × feature set)"]
+        load["Leer dataset de S3"] --> split["Split determinista (seed)<br/>train/test 80/20 estratificado<br/>folds 5×2 + folds de re-evaluación"]
+        split --> optuna["Optuna TPE · N_TRIALS<br/>CV sobre train con los folds fijos<br/>cada trial → run anidado en MLflow"]
+        optuna --> rescore["Re-evaluar los RESCORE_TOP_K mejores<br/>con folds nuevos"]
+        rescore --> best["Ganador = mejor re-evaluación<br/>cv_mean, cv_se, optimism"]
+        best --> refit["Reentrenar con todo train<br/>evaluar UNA vez en test"]
+        refit --> logm["MLflow: métricas, figuras, modelo (S3)<br/>tags: model, feature_set, evaluation_key"]
+    end
+
+    subgraph SELECT["Selección · flow select"]
+        key["evaluation_key actual<br/>(datos + split + métrica)"] --> has{"¿Hay estudios<br/>con esa clave?"}
+        has -- no --> retrain["Error: reentrenar los modelos"]
+        has -- sí --> champ["Champion por modelo = mejor cv_mean<br/>entre sus feature sets → modelo@champion"]
+        champ --> se["Umbral = mejor cv_mean − su SE"]
+        se --> within{"¿cv_mean ≥ umbral?"}
+        within -- no --> out["Descartado"]
+        within -- sí --> testok{"¿test ≥ mejor test<br/>− TEST_TOLERANCE?"}
+        testok -- no --> out
+        testok -- sí --> pick["Menor COMPLEXITY<br/>desempate: mayor cv_mean"]
+        pick --> prod["classifier@production<br/>+ run en experimento selection"]
+        prod --> reload["POST /reload a la API"]
+    end
+
+    subgraph INFER["Inferencia"]
+        direction TB
+        batch["flow batch-inference<br/>input_uri (S3) · rows (JSON) · split de test"] --> loadp["Cargar la versión de classifier@production"]
+        api["API /predict<br/>modelo precargado en memoria"] --> contract
+        loadp --> contract{"¿Están las columnas<br/>que usa el modelo?"}
+        contract -- no --> err["Error con las columnas que faltan<br/>(422 en la API)"]
+        contract -- sí --> pred["Predecir: etiqueta + probabilidades<br/>columnas extra ignoradas"]
+        pred --> pg[("Postgres · predictions")]
+        pred -. solo batch .-> mlinf["MLflow · experimento inference"]
+    end
+
+    eda --> load
+    logm --> key
+    reload --> api
+    prod --> loadp
 ```
 
 El núcleo es Python plano y no depende de Prefect. Para pruebas rápidas desde el host (con los servicios levantados):
@@ -241,6 +296,7 @@ Los hiperparámetros no van aquí: viven en cada módulo de modelo. `DATA_URI`, 
 ## Estructura
 
 ```plain
+├── diagrams/          diagramas de arquitectura (.json fuente, .html interactivo, assets/ PNG)
 ├── lab/eda.ipynb
 ├── src/mlplatform/
 │   ├── config.py      data.py      features.py

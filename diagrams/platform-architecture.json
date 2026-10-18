@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Arquitectura de despliegue de mlplatform",
+    "output": "diagrams/platform-architecture.html",
+    "locale": "es",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "host",
+      "type": "external",
+      "label": "Host",
+      "sublabel": "make · uv · lab/eda.ipynb",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "prefect_server",
+      "type": "backend",
+      "label": "prefect-server",
+      "sublabel": ":4200 · UI + API",
+      "pos": [
+        340,
+        40
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "prefect_serve",
+      "type": "backend",
+      "label": "prefect-serve",
+      "sublabel": "train · select · batch-inference",
+      "pos": [
+        660,
+        40
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Cliente",
+      "sublabel": "navegador · curl",
+      "pos": [
+        40,
+        250
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "api",
+      "type": "frontend",
+      "label": "api (FastAPI)",
+      "sublabel": ":8000 · modelo en memoria",
+      "pos": [
+        340,
+        250
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "mlflow",
+      "type": "backend",
+      "label": "mlflow",
+      "sublabel": ":5000 · tracking + registry",
+      "pos": [
+        660,
+        250
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "s3",
+      "type": "database",
+      "label": "s3 (RustFS)",
+      "sublabel": "buckets data · mlflow",
+      "pos": [
+        1000,
+        250
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "seed",
+      "type": "backend",
+      "label": "s3-init · seed",
+      "sublabel": "buckets + data.csv",
+      "pos": [
+        1000,
+        460
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "postgres",
+      "sublabel": "mlflow · optuna · prefect · app",
+      "pos": [
+        660,
+        460
+      ],
+      "size": [
+        190,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "docker compose",
+      "wraps": [
+        "prefect_server",
+        "prefect_serve",
+        "api",
+        "mlflow",
+        "s3",
+        "seed",
+        "postgres"
+      ],
+      "pad": 22
+    }
+  ],
+  "connections": [
+    {
+      "from": "host",
+      "to": "prefect_server",
+      "label": "deployment run",
+      "variant": "emphasis"
+    },
+    {
+      "from": "prefect_serve",
+      "to": "prefect_server",
+      "label": "polling de runs"
+    },
+    {
+      "from": "prefect_serve",
+      "to": "mlflow",
+      "label": "runs · modelos",
+      "variant": "emphasis"
+    },
+    {
+      "from": "prefect_serve",
+      "to": "s3",
+      "label": "lee dataset"
+    },
+    {
+      "from": "prefect_serve",
+      "to": "api",
+      "label": "POST /reload",
+      "variant": "dashed"
+    },
+    {
+      "from": "client",
+      "to": "api",
+      "label": "POST /predict",
+      "variant": "emphasis"
+    },
+    {
+      "from": "api",
+      "to": "mlflow",
+      "label": "carga production"
+    },
+    {
+      "from": "api",
+      "to": "postgres",
+      "label": "predicciones"
+    },
+    {
+      "from": "mlflow",
+      "to": "s3",
+      "label": "artefactos"
+    },
+    {
+      "from": "mlflow",
+      "to": "postgres",
+      "label": "metadatos"
+    },
+    {
+      "from": "seed",
+      "to": "s3",
+      "label": "buckets · data.csv"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Persistencia",
+      "items": [
+        "postgres: bases mlflow, optuna, prefect y app (tabla predictions)",
+        "s3://data: dataset original y lotes de inferencia",
+        "s3://mlflow: artefactos y modelos, servidos por el proxy de MLflow",
+        "Volúmenes Docker pgdata y s3data"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Flows en prefect-serve",
+      "items": [
+        "train: estudios de Optuna (trials en la base optuna) y modelos en MLflow",
+        "select: registra champions y classifier@production, luego POST /reload",
+        "batch-inference: predicciones a la tabla predictions"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Desde el host",
+      "items": [
+        "make train / select / infer lanzan deployments",
+        "uv run python -m mlplatform.* ejecuta el mismo núcleo sin Prefect",
+        "lab/eda.ipynb registra el EDA en MLflow"
+      ]
+    }
+  ]
+}
