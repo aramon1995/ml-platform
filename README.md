@@ -25,7 +25,7 @@ make infer            # predice con el modelo de producción y guarda en Postgre
 | Servicio | URL | Credenciales |
 | --- | --- | --- |
 | Prefect (lanzar y seguir flows) | `http://localhost:4200` | |
-| API de inferencia online (docs interactivas en `/docs`) | `http://localhost:8000` | |
+| API de inferencia online: página de prueba en `/`, docs en `/docs` | `http://localhost:8000` | |
 | MLflow (experimentos y modelos) | `http://localhost:5000` | |
 | Consola S3 (datos y artefactos) | `http://localhost:9101/rustfs/console` | `s3admin` / `s3admin12345` |
 | Postgres | `localhost:5432` | `mlp` / `mlp`; bases `app`, `mlflow`, `optuna`, `prefect` |
@@ -184,6 +184,7 @@ El servicio `api` (FastAPI) carga `classifier@production` **una vez al arrancar*
 | Endpoint | Uso |
 | --- | --- |
 | `POST /predict` | Predice una o varias filas: `{"rows": [{...}, ...]}`. Devuelve etiqueta, probabilidades y el modelo usado |
+| `GET /` | Página HTML para probar `/predict`: muestra el modelo en producción y acepta un formulario con sus columnas o una lista de filas en JSON |
 | `GET /health` | Estado, modelo cargado y columnas que necesita |
 | `POST /reload` | Vuelve a cargar `classifier@production`. El flow `select` lo llama solo tras cada selección |
 

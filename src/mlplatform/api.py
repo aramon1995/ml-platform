@@ -7,10 +7,12 @@ every selection.
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import mlflow
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from mlplatform.config import get_settings
@@ -66,6 +68,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="mlplatform", lifespan=lifespan)
+
+
+@app.get("/", include_in_schema=False)
+def ui() -> FileResponse:
+    """Minimal page to try /predict by hand."""
+    return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
 @app.get("/health")

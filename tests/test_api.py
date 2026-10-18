@@ -42,3 +42,8 @@ def test_predict_rejects_rows_missing_required_columns(client):
 def test_health_and_reload_report_the_model(client):
     assert client.get("/health").json()["model"]["required_columns"] == ["Timestamp", "F22", "F17"]
     assert client.post("/reload").json()["model_family"] == "logreg"
+
+
+def test_root_serves_the_predict_page(client):
+    response = client.get("/")
+    assert response.status_code == 200 and "mlplatform · predict" in response.text
