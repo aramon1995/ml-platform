@@ -25,6 +25,7 @@ make infer            # predice con el modelo de producción y guarda en Postgre
 | Servicio | URL | Credenciales |
 | --- | --- | --- |
 | Prefect (lanzar y seguir flows) | `http://localhost:4200` | |
+| API de inferencia online (docs interactivas en `/docs`) | `http://localhost:8000` | |
 | MLflow (experimentos y modelos) | `http://localhost:5000` | |
 | Consola S3 (datos y artefactos) | `http://localhost:9101/rustfs/console` | `s3admin` / `s3admin12345` |
 | Postgres | `localhost:5432` | `mlp` / `mlp`; bases `app`, `mlflow`, `optuna`, `prefect` |
@@ -62,6 +63,7 @@ models/<modelo>.py     pipeline (preprocesado + estimador) + espacio de búsqued
 tuning.py              Optuna con split y folds fijos → MLflow
 selection.py           champion por modelo → producción (regla 1-SE + complejidad)
 inference.py           lote de S3 → classifier@production → Postgres
+api.py                 API online con classifier@production en memoria → Postgres
 flows.py               flows de Prefect sobre las piezas anteriores
 ```
 
@@ -168,12 +170,30 @@ Solo compiten los estudios con la **clave de evaluación** actual: mismos datos,
 | `prediction_id`, `timestamp`, `predicted_value` | Base |
 | `probabilities` | Probabilidad por clase (JSONB) |
 | `model_name`, `model_version`, `model_family`, `feature_set`, `run_id` | Qué modelo predijo |
-| `batch_id`, `input_uri` | De qué lote viene (`inline` si las filas se pasaron directamente) |
+| `batch_id`, `input_uri` | De qué lote viene (`inline` si las filas se pasaron directamente, `api` si llegaron por la API) |
 | `features` | Valores de entrada que usó el modelo (JSONB) |
 
 ```bash
 docker compose exec postgres psql -U mlp -d app -c "select prediction_id, timestamp, predicted_value, model_family, model_version from predictions limit 5"
 ```
+
+### 7. API online
+
+El servicio `api` (FastAPI) carga `classifier@production` **una vez al arrancar** y lo mantiene en memoria, así que cada predicción tarda milisegundos (unos 0,1 s, escritura en Postgres incluida). Cada predicción se guarda en `predictions` con `input_uri = 'api'`.
+
+| Endpoint | Uso |
+| --- | --- |
+| `POST /predict` | Predice una o varias filas: `{"rows": [{...}, ...]}`. Devuelve etiqueta, probabilidades y el modelo usado |
+| `GET /health` | Estado, modelo cargado y columnas que necesita |
+| `POST /reload` | Vuelve a cargar `classifier@production`. El flow `select` lo llama solo tras cada selección |
+
+```bash
+curl -s localhost:8000/health
+curl -s -X POST localhost:8000/predict -H 'Content-Type: application/json' \
+  -d '{"rows": [{"Timestamp": "2025-07-20 10:00:00", "F22": 30.0, "F17": null}]}'
+```
+
+El ejemplo vale para un modelo con `eda_minimal`. Las filas deben incluir las columnas que indica `/health` (`required_columns`); si falta alguna responde 422 con la lista. Si no hay modelo de producción, la API arranca igualmente y responde 503 hasta que una selección lo promueva. A diferencia de la inferencia batch, la API no registra cada petición en MLflow: solo en Postgres.
 
 ## Dónde mirar los resultados
 
@@ -224,7 +244,7 @@ Los hiperparámetros no van aquí: viven en cada módulo de modelo. `DATA_URI`, 
 ├── src/mlplatform/
 │   ├── config.py      data.py      features.py
 │   ├── models/        logreg.py  svm.py  random_forest.py  xgboost.py  mlp.py
-│   ├── tuning.py      selection.py   inference.py   reporting.py
+│   ├── tuning.py      selection.py   inference.py   api.py   reporting.py
 │   ├── storage.py     (buckets y subida a S3)
 │   └── flows.py       (Prefect)
 ├── tests/
@@ -236,7 +256,7 @@ Los hiperparámetros no van aquí: viven en cada módulo de modelo. `DATA_URI`, 
 - **El mes explica el target**: enero → A, abril → B, julio → C, octubre → D. El split aleatorio estratificado mide interpolación: asume datos nuevos de esos mismos periodos. Un split temporal no es viable porque dejaría la clase D (solo octubre) fuera del entrenamiento.
 - **≈6 % de filas fuera de patrón**: `F22` es la única pista para ellas.
 - **Re-evaluación con los mismos datos**: Se evaluan los modelos con folds nuevos que reparten las mismas 400 filas de otra forma. Eliminan la suerte de la partición, no la de la muestra; para eso sigue estando el test.
-- **Modelo no residente**: la inferencia carga el modelo una vez por lote. Para esto, se puede montar un FastAPI dentro de un container y utilizarlo como servicio de inferencia, tendriamos que tener tambien un endpoint de update que se lance desde prefect como ultimo paso del flujo de train-select al actualizar el champion.
+- **Inferencia batch sin modelo residente**: los flows de inferencia cargan el modelo una vez por lote. Para predicciones online de baja latencia está la API, que lo mantiene en memoria.
 - **Entrenamiento secuencial**: los estudios se ejecutan uno tras otro. Se pueden hacer como flujos paralelos tipo map en el entrenamiento y reduce en la seleccion, esto seria mas rapido pero consumiria mas recursos, para pruebas en local mejor secuencial
 
 ## Escalado a cloud
@@ -248,5 +268,5 @@ Los hiperparámetros no van aquí: viven en cada módulo de modelo. `DATA_URI`, 
 | MLflow | Contenedor gestionado (ECS/Cloud Run) o MLflow gestionado, con backend en RDS |
 | Prefect server + serve | Prefect Cloud o servidor propio, con work pools de Kubernetes/ECS: un contenedor por flow run |
 | Estudios de Optuna | Trials en paralelo en varios workers que comparten el storage en Postgres |
-| Inferencia | Flow batch programado; un servicio FastAPI con autoscaling si se necesita online |
+| Inferencia | Flow batch programado; la API en un servicio con autoscaling (ECS/Cloud Run/Kubernetes) detrás de un balanceador. Con varias réplicas, `/reload` se sustituye por un despliegue progresivo o por que cada réplica consulte el alias periódicamente |
 | Infraestructura | Terraform; imágenes en un registry; CI con tests y despliegue |

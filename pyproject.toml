@@ -12,6 +12,8 @@ dependencies = [
     "sqlalchemy",
     "psycopg2-binary",
     "prefect",
+    "fastapi",
+    "uvicorn",
     "optuna",
     "xgboost",
     "torch",

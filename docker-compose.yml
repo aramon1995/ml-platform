@@ -13,6 +13,7 @@ x-app: &app
     DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/app
     OPTUNA_STORAGE: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/optuna
     PREFECT_API_URL: http://prefect-server:4200/api
+    API_URL: http://api:8000
 
 services:
   postgres:
@@ -93,6 +94,17 @@ services:
     depends_on:
       prefect-server: {condition: service_healthy}
       mlflow: {condition: service_healthy}
+
+  api:
+    <<: *app
+    command: uvicorn mlplatform.api:app --host 0.0.0.0 --port 8000
+    ports: ["8000:8000"]
+    depends_on:
+      mlflow: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      retries: 10
 
 volumes:
   pgdata:

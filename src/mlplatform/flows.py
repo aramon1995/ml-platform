@@ -1,9 +1,12 @@
 """Prefect flows: a thin layer over the plain-Python core (tuning, selection, inference)."""
 
-from prefect import flow, serve, task
+import urllib.request
+
+from prefect import flow, get_run_logger, serve, task
 from prefect.schedules import Cron
 
 from mlplatform import inference, selection, tuning
+from mlplatform.config import get_settings
 from mlplatform.features import DEFAULT_FEATURE_SET
 from mlplatform.models import MODELS
 
@@ -21,10 +24,22 @@ def train(
     return {name: tune(name, feature_set, n_trials) for name in models or list(MODELS)}
 
 
+@task
+def reload_api() -> None:
+    """Point the online API at the current production model. The API is optional: failures only warn."""
+    request = urllib.request.Request(f"{get_settings().api_url}/reload", method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=120):
+            pass
+    except OSError as e:
+        get_run_logger().warning(f"API reload skipped: {e}")
+
+
 @flow(name="select")
 def select() -> str:
-    """Per-model champions and the global production model (1-SE rule + complexity)."""
+    """Per-model champions and the global production model (1-SE rule + complexity); then reload the API."""
     table = selection.select()
+    reload_api()
     return table.loc[table["selected"], "model"].item()
 
 

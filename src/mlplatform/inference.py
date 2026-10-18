@@ -71,6 +71,19 @@ def predict(model: Pipeline, X: pd.DataFrame) -> pd.DataFrame:
     })
 
 
+def annotate(results: pd.DataFrame, version, batch_id: str, source: str) -> pd.DataFrame:
+    """Add the metadata stored with every prediction: which model predicted and where the rows came from."""
+    return results.assign(
+        model_name=PRODUCTION_MODEL,
+        model_version=int(version.version),
+        model_family=version.tags.get("model", "unknown"),
+        feature_set=version.tags.get("feature_set", "unknown"),
+        run_id=version.run_id,
+        batch_id=batch_id,
+        input_uri=source,
+    )
+
+
 def store(results: pd.DataFrame) -> None:
     engine = create_engine(get_settings().database_url)
     metadata.create_all(engine)
@@ -84,15 +97,7 @@ def batch_inference(input_uri: str | None = None, rows: list[dict] | None = None
     model, version = load_production()
     X, source = load_batch(input_uri, rows)
     batch_id = uuid.uuid4().hex
-    results = predict(model, X).assign(
-        model_name=PRODUCTION_MODEL,
-        model_version=int(version.version),
-        model_family=version.tags.get("model", "unknown"),
-        feature_set=version.tags.get("feature_set", "unknown"),
-        run_id=version.run_id,
-        batch_id=batch_id,
-        input_uri=source,
-    )
+    results = annotate(predict(model, X), version, batch_id, source)
     store(results)
 
     mlflow.set_experiment(EXPERIMENT)

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str = "http://localhost:5000"
     database_url: str = "postgresql+psycopg2://mlp:mlp@localhost:5432/app"
     optuna_storage: str = "postgresql+psycopg2://mlp:mlp@localhost:5432/optuna"
+    api_url: str = "http://localhost:8000"
 
     @property
     def storage_options(self) -> dict:
