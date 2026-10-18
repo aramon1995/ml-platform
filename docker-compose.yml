@@ -1,0 +1,98 @@
+x-app: &app
+  build: .
+  image: mlplatform:latest
+  env_file: [.env]
+  environment:
+    GIT_PYTHON_REFRESH: quiet
+    MLFLOW_DISABLE_AGENT_HINT: "1"
+    AWS_ENDPOINT_URL: http://s3:9000
+    AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+    AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+    MLFLOW_S3_ENDPOINT_URL: http://s3:9000
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/app
+    OPTUNA_STORAGE: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/optuna
+    PREFECT_API_URL: http://prefect-server:4200/api
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      retries: 10
+
+  s3:
+    image: rustfs/rustfs:latest
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY}
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+    ports: ["${S3_PORT:-9100}:9000", "${S3_CONSOLE_PORT:-9101}:9001"]
+    volumes: [s3data:/data]
+
+  s3-init:
+    <<: *app
+    command: python -m mlplatform.storage create-buckets
+    depends_on: [s3]
+    restart: "no"
+
+  mlflow:
+    <<: *app
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow
+      --artifacts-destination s3://mlflow --serve-artifacts
+      --allowed-hosts "*" --cors-allowed-origins "*"
+    ports: ["5000:5000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      s3-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      retries: 10
+
+  seed:
+    <<: *app
+    command: python -m mlplatform.storage upload /seed/data.csv
+    volumes: ["./data.csv:/seed/data.csv:ro"]
+    depends_on:
+      s3-init: {condition: service_completed_successfully}
+    profiles: [tools]
+
+  prefect-server:
+    <<: *app
+    command: prefect server start --host 0.0.0.0 --port 4200
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/prefect
+      PREFECT_UI_API_URL: http://localhost:4200/api
+      PREFECT_SERVER_ANALYTICS_ENABLED: "false"
+    ports: ["4200:4200"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:4200/api/health')"]
+      interval: 10s
+      retries: 20
+
+  prefect-serve:
+    <<: *app
+    command: python -m mlplatform.flows
+    depends_on:
+      prefect-server: {condition: service_healthy}
+      mlflow: {condition: service_healthy}
+
+volumes:
+  pgdata:
+  s3data:

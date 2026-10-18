@@ -1,0 +1,6 @@
+.venv
+.git
+__pycache__
+*.pdf
+lab
+data.csv
