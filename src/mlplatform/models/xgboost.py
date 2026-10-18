@@ -49,4 +49,4 @@ def suggest(trial: Trial) -> dict:
 
 def build_pipeline(params: dict, features: FeatureSet) -> Pipeline:
     model = LabelEncodedXGB(n_jobs=1, random_state=get_settings().seed, **params)
-    return Pipeline([("prep", features.preprocessor(scale=False)), ("model", model)])
+    return Pipeline([("features", features.build()), ("model", model)])

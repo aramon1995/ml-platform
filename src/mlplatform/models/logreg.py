@@ -1,6 +1,7 @@
 from optuna import Trial
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from mlplatform.config import get_settings
 from mlplatform.features import FeatureSet
@@ -15,4 +16,4 @@ def suggest(trial: Trial) -> dict:
 
 def build_pipeline(params: dict, features: FeatureSet) -> Pipeline:
     model = LogisticRegression(class_weight="balanced", max_iter=2000, random_state=get_settings().seed, **params)
-    return Pipeline([("prep", features.preprocessor(scale=True)), ("model", model)])
+    return Pipeline([("features", features.build()), ("scale", StandardScaler()), ("model", model)])

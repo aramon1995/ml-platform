@@ -19,4 +19,4 @@ def suggest(trial: Trial) -> dict:
 
 def build_pipeline(params: dict, features: FeatureSet) -> Pipeline:
     model = RandomForestClassifier(class_weight="balanced", random_state=get_settings().seed, **params)
-    return Pipeline([("prep", features.preprocessor(scale=False)), ("model", model)])
+    return Pipeline([("features", features.build()), ("model", model)])

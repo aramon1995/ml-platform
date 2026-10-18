@@ -82,12 +82,13 @@ Figuras, tablas y conclusiones se registran en MLflow (experimento `eda`). La se
 
 Resultado del analisis exploratorio, si detectamos data skews o decremento del modelo de produccion con el tiempo, debemos rehacer el analisis y sacar nuevas conclusiones si es necesario y aplicarlas en `features.py` como un feature set nuevo para el entrenamiento.
 
-Un **feature set** es una lista de columnas con nombre y su tratamiento. Es **inmutable**: una vez se ha entrenado un modelo con él, no se edita; para probar otro preprocesado se añade uno nuevo. Es una regla de trabajo, no una comprobación automática: editar un feature set ya usado cambiaría en silencio los modelos que dependen de él.
+Un **feature set** es una función de `features.py` decorada con `@feature_set` que devuelve un `ColumnTransformer` de scikit-learn: decide qué columnas entran y cómo se limpian y codifican, con cualquier paso estándar (imputación por media o mediana, discretización, encoders…). Su docstring es su descripción y sus columnas de entrada se leen del propio transformer. Es **inmutable**: una vez se ha entrenado un modelo con él, no se edita; para probar otro preprocesado se añade uno nuevo. Es una regla de trabajo, no una comprobación automática: editar un feature set ya usado cambiaría en silencio los modelos que dependen de él.
 
 | Feature set | Columnas |
 | --- | --- |
 | `eda_minimal` (por defecto) | Decisiones del EDA: mes, `F22`, `F17` |
 | `with_flat_columns` | `eda_minimal` + las 8 columnas planas que el EDA descartó (F3, F6, F9, F12, F18, F21, F24, F27) |
+| `reduced_set` | `eda_minimal` sin `F17` |
 
 Tratamiento en `eda_minimal`:
 
@@ -97,11 +98,22 @@ Tratamiento en `eda_minimal`:
 | `F22` | Imputación por mediana | Única numérica con señal fuerte (MI 0,76) |
 | `F17` | Mediana + indicador de nulo | 90 % nulos; el valor informa cuando está |
 
-Cada feature set genera su preprocesador con `preprocessor(scale=...)`: los modelos lineales, SVM y MLP escalan las numéricas; random forest y XGBoost no.
+Los pasos que dependen del algoritmo no van en el feature set sino en el módulo del modelo: logreg, SVM y MLP añaden un `StandardScaler` después del feature set; random forest y XGBoost no escalan.
 
 Un modelo se entrena **solo con las columnas de su feature set**. En inferencia, las columnas extra o ausentes que el modelo no usa se ignoran; si falta una que sí usa, la predicción falla con un error explícito en lugar de inventar valores.
 
-**Añadir un feature set**: añadir un `FeatureSet` con nombre descriptivo a `FEATURE_SETS` en `features.py`.
+**Añadir un feature set**: escribir en `features.py` una función con nombre descriptivo, decorada con `@feature_set`, que devuelva `columns(...)` (o cualquier `ColumnTransformer`). Las piezas `columns()` y `month_onehot()` cubren lo habitual. Por ejemplo, imputar `F22` con la media:
+
+```python
+@feature_set
+def eda_minimal_mean() -> ColumnTransformer:
+    """eda_minimal imputing F22 with the mean."""
+    return columns(
+        ("month", month_onehot(), [TIMESTAMP]),
+        ("strong", SimpleImputer(strategy="mean"), ["F22"]),
+        ("sparse", SimpleImputer(strategy="median", add_indicator=True), ["F17"]),
+    )
+```
 
 ### 3. Modelos
 
@@ -112,7 +124,7 @@ NAME = "svm"
 COMPLEXITY = 2                            # orden de simplicidad y explicabilidad
 
 def suggest(trial) -> dict: ...           # espacio de búsqueda de Optuna
-def build_pipeline(params, features) -> Pipeline: ...  # preprocesado del feature set + estimador
+def build_pipeline(params, features) -> Pipeline: ...  # feature set (+ escalado si el modelo lo necesita) + estimador
 ```
 
 | Modelo | Complejidad | Notas |

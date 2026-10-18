@@ -9,6 +9,7 @@ import pandas as pd
 from mlflow.models import infer_signature
 from sklearn.metrics import classification_report, get_scorer
 from sklearn.model_selection import cross_val_score
+from sklearn.pipeline import Pipeline
 
 from mlplatform import reporting
 from mlplatform.config import get_settings
@@ -47,7 +48,7 @@ def run_study(name: str, feature_set: str = DEFAULT_FEATURE_SET, n_trials: int |
         sampler=optuna.samplers.TPESampler(seed=s.seed),
     )
 
-    def build(params: dict):
+    def build(params: dict) -> Pipeline:
         return model.build_pipeline(params, features)
 
     def objective(trial: optuna.Trial) -> float:

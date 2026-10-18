@@ -1,5 +1,6 @@
 from optuna import Trial
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 from mlplatform.config import get_settings
@@ -18,4 +19,4 @@ def suggest(trial: Trial) -> dict:
 
 def build_pipeline(params: dict, features: FeatureSet) -> Pipeline:
     model = SVC(kernel="rbf", class_weight="balanced", probability=True, random_state=get_settings().seed, **params)
-    return Pipeline([("prep", features.preprocessor(scale=True)), ("model", model)])
+    return Pipeline([("features", features.build()), ("scale", StandardScaler()), ("model", model)])

@@ -6,6 +6,7 @@ from optuna import Trial
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
 from torch import nn
 
@@ -110,4 +111,4 @@ def suggest(trial: Trial) -> dict:
 
 def build_pipeline(params: dict, features: FeatureSet) -> Pipeline:
     model = TorchMLP(seed=get_settings().seed, **params)
-    return Pipeline([("prep", features.preprocessor(scale=True)), ("model", model)])
+    return Pipeline([("features", features.build()), ("scale", StandardScaler()), ("model", model)])

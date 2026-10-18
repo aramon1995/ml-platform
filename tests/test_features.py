@@ -17,15 +17,20 @@ def raw():
 
 
 @pytest.mark.parametrize("name", list(FEATURE_SETS))
-@pytest.mark.parametrize("scale", [True, False])
-def test_every_feature_set_transforms_its_columns_without_nans(name, scale, raw):
+def test_every_feature_set_transforms_its_columns_without_nans(name, raw):
     features = FEATURE_SETS[name]
-    out = features.preprocessor(scale=scale).fit_transform(raw[features.columns])
+    out = features.build().fit_transform(raw[features.columns])
     assert len(out) == len(raw) and not np.isnan(out).any()
 
 
 def test_unseen_month_encodes_as_all_zeros(raw):
     features = FEATURE_SETS["eda_minimal"]
-    prep = features.preprocessor(scale=False).fit(raw[features.columns])
+    prep = features.build().fit(raw[features.columns])
     out = prep.transform(pd.DataFrame({"Timestamp": ["2025-12-24"], "F22": [1.0], "F17": [np.nan]}))
     assert out[0, :3].tolist() == [0.0, 0.0, 0.0]
+
+
+def test_feature_set_columns_and_description_come_from_its_function():
+    features = FEATURE_SETS["eda_minimal"]
+    assert features.columns == ["Timestamp", "F22", "F17"]
+    assert features.description.startswith("EDA decisions")
