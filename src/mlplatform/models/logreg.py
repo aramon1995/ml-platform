@@ -3,7 +3,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
 from mlplatform.config import get_settings
-from mlplatform.features import linear_preprocessor
+from mlplatform.features import FeatureSet
 
 NAME = "logreg"
 COMPLEXITY = 1
@@ -13,6 +13,6 @@ def suggest(trial: Trial) -> dict:
     return {"C": trial.suggest_float("C", 1e-3, 1e2, log=True)}
 
 
-def build_pipeline(params: dict) -> Pipeline:
+def build_pipeline(params: dict, features: FeatureSet) -> Pipeline:
     model = LogisticRegression(class_weight="balanced", max_iter=2000, random_state=get_settings().seed, **params)
-    return Pipeline([("prep", linear_preprocessor()), ("model", model)])
+    return Pipeline([("prep", features.preprocessor(scale=True)), ("model", model)])

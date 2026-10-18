@@ -4,18 +4,21 @@ from prefect import flow, serve, task
 from prefect.schedules import Cron
 
 from mlplatform import inference, selection, tuning
+from mlplatform.features import DEFAULT_FEATURE_SET
 from mlplatform.models import MODELS
 
 
-@task(task_run_name="tune-{name}")
-def tune(name: str, n_trials: int | None) -> str:
-    return tuning.run_study(name, n_trials)
+@task(task_run_name="tune-{name}-{feature_set}")
+def tune(name: str, feature_set: str, n_trials: int | None) -> str:
+    return tuning.run_study(name, feature_set, n_trials)
 
 
 @flow(name="train")
-def train(models: list[str] | None = None, n_trials: int | None = None) -> dict[str, str]:
-    """One Optuna study per model, sequentially, on the shared split and folds."""
-    return {name: tune(name, n_trials) for name in models or list(MODELS)}
+def train(
+    models: list[str] | None = None, feature_set: str = DEFAULT_FEATURE_SET, n_trials: int | None = None
+) -> dict[str, str]:
+    """One Optuna study per model on one feature set, sequentially, on the shared split and folds."""
+    return {name: tune(name, feature_set, n_trials) for name in models or list(MODELS)}
 
 
 @flow(name="select")
@@ -26,8 +29,10 @@ def select() -> str:
 
 
 @flow(name="train-and-select")
-def train_and_select(models: list[str] | None = None, n_trials: int | None = None) -> str:
-    train(models, n_trials)
+def train_and_select(
+    models: list[str] | None = None, feature_set: str = DEFAULT_FEATURE_SET, n_trials: int | None = None
+) -> str:
+    train(models, feature_set, n_trials)
     return select()
 
 

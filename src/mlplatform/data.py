@@ -1,4 +1,5 @@
 import hashlib
+import json
 from dataclasses import dataclass
 
 import pandas as pd
@@ -26,6 +27,16 @@ def load_dataset(uri: str | None = None) -> pd.DataFrame:
 
 def digest(df: pd.DataFrame) -> str:
     return hashlib.md5(pd.util.hash_pandas_object(df, index=False).values.tobytes()).hexdigest()[:12]
+
+
+def evaluation_key(df: pd.DataFrame) -> str:
+    """Studies are comparable only if trained and scored on the same data, split and metric.
+
+    Any change in this key means every model has to be retrained before selection.
+    """
+    s = get_settings()
+    payload = [digest(df), s.target, s.seed, s.test_size, s.n_splits, s.n_repeats, s.metric]
+    return hashlib.md5(json.dumps(payload).encode()).hexdigest()[:12]
 
 
 def features_target(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:

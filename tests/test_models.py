@@ -3,6 +3,7 @@ import optuna
 import pandas as pd
 import pytest
 
+from mlplatform.features import FEATURE_SETS
 from mlplatform.models import MODELS
 
 
@@ -25,7 +26,7 @@ def test_every_model_suggests_builds_and_predicts_labels(name, data):
     X, y = data
     module = MODELS[name]
     params = module.suggest(optuna.trial.FixedTrial(_fixed(name)))
-    pipeline = module.build_pipeline(params).fit(X, y)
+    pipeline = module.build_pipeline(params, FEATURE_SETS["eda_minimal"]).fit(X, y)
     assert set(pipeline.predict(X)) <= set(y)
     assert (pipeline.predict(X) == y).mean() > 0.9
     assert pipeline.predict_proba(X).shape == (len(X), 3)

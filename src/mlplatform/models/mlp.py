@@ -10,7 +10,7 @@ from sklearn.utils.class_weight import compute_class_weight
 from torch import nn
 
 from mlplatform.config import get_settings
-from mlplatform.features import linear_preprocessor
+from mlplatform.features import FeatureSet
 
 NAME = "mlp"
 COMPLEXITY = 4
@@ -108,6 +108,6 @@ def suggest(trial: Trial) -> dict:
     }
 
 
-def build_pipeline(params: dict) -> Pipeline:
+def build_pipeline(params: dict, features: FeatureSet) -> Pipeline:
     model = TorchMLP(seed=get_settings().seed, **params)
-    return Pipeline([("prep", linear_preprocessor()), ("model", model)])
+    return Pipeline([("prep", features.preprocessor(scale=True)), ("model", model)])

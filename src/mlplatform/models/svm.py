@@ -3,7 +3,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.svm import SVC
 
 from mlplatform.config import get_settings
-from mlplatform.features import linear_preprocessor
+from mlplatform.features import FeatureSet
 
 NAME = "svm"
 COMPLEXITY = 2
@@ -16,6 +16,6 @@ def suggest(trial: Trial) -> dict:
     }
 
 
-def build_pipeline(params: dict) -> Pipeline:
+def build_pipeline(params: dict, features: FeatureSet) -> Pipeline:
     model = SVC(kernel="rbf", class_weight="balanced", probability=True, random_state=get_settings().seed, **params)
-    return Pipeline([("prep", linear_preprocessor()), ("model", model)])
+    return Pipeline([("prep", features.preprocessor(scale=True)), ("model", model)])

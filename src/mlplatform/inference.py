@@ -6,6 +6,7 @@ import uuid
 import mlflow
 import pandas as pd
 from mlflow import MlflowClient
+from sklearn.pipeline import Pipeline
 from sqlalchemy import BigInteger, Column, DateTime, Integer, MetaData, String, Table, create_engine, func
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -27,6 +28,7 @@ predictions = Table(
     Column("model_name", String, nullable=False),
     Column("model_version", Integer, nullable=False),
     Column("model_family", String, nullable=False),
+    Column("feature_set", String, nullable=False),
     Column("run_id", String, nullable=False),
     Column("batch_id", String, nullable=False),
     Column("input_uri", String, nullable=False),
@@ -41,7 +43,7 @@ def load_production():
 
 
 def load_batch(input_uri: str | None) -> tuple[pd.DataFrame, str]:
-    """Raw rows from S3 (a `Target` column, if present, is ignored); without input, the test split is the sample batch."""
+    """Raw rows from S3; without input, the test split is the sample batch."""
     s = get_settings()
     if input_uri:
         return read_csv(input_uri).drop(columns=[s.target], errors="ignore"), input_uri
@@ -49,10 +51,13 @@ def load_batch(input_uri: str | None) -> tuple[pd.DataFrame, str]:
     return X.loc[make_split(y).test].reset_index(drop=True), f"{s.data_uri}#test"
 
 
-def predict(model, X: pd.DataFrame) -> pd.DataFrame:
-    missing = set(model.feature_names_in_) - set(X.columns)
+def predict(model: Pipeline, X: pd.DataFrame) -> pd.DataFrame:
+    """Uses only the columns the model was trained on; others are ignored, missing ones are an error."""
+    required = list(model.feature_names_in_)
+    missing = set(required) - set(X.columns)
     if missing:
-        raise ValueError(f"batch is missing columns: {sorted(missing)}")
+        raise ValueError(f"batch is missing columns the model needs: {sorted(missing)}")
+    X = X[required]
     proba = model.predict_proba(X)
     return pd.DataFrame({
         "predicted_value": model.classes_[proba.argmax(axis=1)],
@@ -78,6 +83,7 @@ def batch_inference(input_uri: str | None = None) -> str:
         model_name=PRODUCTION_MODEL,
         model_version=int(version.version),
         model_family=version.tags.get("model", "unknown"),
+        feature_set=version.tags.get("feature_set", "unknown"),
         run_id=version.run_id,
         batch_id=batch_id,
         input_uri=source,
@@ -86,7 +92,8 @@ def batch_inference(input_uri: str | None = None) -> str:
 
     mlflow.set_experiment(EXPERIMENT)
     with mlflow.start_run(run_name=f"batch-{batch_id[:8]}", tags={"batch_id": batch_id}):
-        mlflow.log_params({"input_uri": source, "model_version": version.version, "model_family": results["model_family"][0]})
+        mlflow.log_params({"input_uri": source, "model_version": version.version, "model_family": results["model_family"][0],
+                           "feature_set": results["feature_set"][0]})
         counts = results["predicted_value"].value_counts()
         confidence = results["probabilities"].map(lambda p: max(p.values()))
         mlflow.log_metrics({"n_rows": len(results), "mean_confidence": confidence.mean()} | {f"n_{k}": v for k, v in counts.items()})

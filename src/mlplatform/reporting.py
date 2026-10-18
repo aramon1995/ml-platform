@@ -1,6 +1,8 @@
 """Figures and tables logged to MLflow; everything stays in memory."""
 
 import matplotlib
+from sklearn.utils import Bunch
+from sklearn.pipeline import Pipeline
 
 matplotlib.use("Agg")
 
@@ -18,10 +20,10 @@ def confusion_matrix(model, X, y) -> plt.Figure:
     return ConfusionMatrixDisplay.from_estimator(model, X, y, cmap="Blues").figure_
 
 
-def permutation_importances(model, X, y) -> pd.Series:
+def permutation_importances(model: Pipeline, X:pd.DataFrame, y) -> pd.Series:
     """Model-agnostic: drop in score when each raw input column is shuffled."""
     s = get_settings()
-    result = permutation_importance(model, X, y, scoring=s.metric, n_repeats=10, random_state=s.seed)
+    result: Bunch = permutation_importance(model, X, y, scoring=s.metric, n_repeats=10, random_state=s.seed)
     return pd.Series(result.importances_mean, index=X.columns).sort_values(ascending=False)
 
 

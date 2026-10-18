@@ -12,7 +12,8 @@ from sklearn.model_selection import cross_val_score
 
 from mlplatform import reporting
 from mlplatform.config import get_settings
-from mlplatform.data import digest, features_target, load_dataset, make_split
+from mlplatform.data import digest, evaluation_key, features_target, load_dataset, make_split
+from mlplatform.features import DEFAULT_FEATURE_SET, FEATURE_SETS
 from mlplatform.models import MODELS
 
 EXPERIMENT = "tuning"
@@ -21,53 +22,69 @@ REPORT_METRICS = ("accuracy", "balanced_accuracy")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
-def run_study(name: str, n_trials: int | None = None) -> str:
-    """Tune one model with Optuna on the shared folds, re-score the top trials on fresh folds,
-    refit the winner on train and evaluate it once on test.
+def run_study(name: str, feature_set: str = DEFAULT_FEATURE_SET, n_trials: int | None = None) -> str:
+    """Tune one model on one feature set with Optuna on the shared folds, re-score the top trials on
+    fresh folds, refit the winner on train and evaluate it once on test.
 
-    MLflow layout: parent run `<name>` → nested `<name>/trial-NNN` runs and a `<name>/final` run with the model.
-    Returns the parent run id.
+    MLflow layout: parent run `<model>/<feature_set>` → nested `.../trial-NNN` runs and a `.../final` run
+    with the model. Returns the parent run id.
     """
     s = get_settings()
-    model = MODELS[name]
+    model, features = MODELS[name], FEATURE_SETS[feature_set]
+    run_name = f"{name}/{feature_set}"
     df = load_dataset()
     X, y = features_target(df)
+    X = X[features.columns]
     split = make_split(y)
     X_train, y_train, X_test, y_test = X.loc[split.train], y.loc[split.train], X.loc[split.test], y.loc[split.test]
 
     mlflow.set_tracking_uri(s.mlflow_tracking_uri)
     mlflow.set_experiment(EXPERIMENT)
     study = optuna.create_study(
-        study_name=f"{name}-{datetime.now():%Y%m%d-%H%M%S}",
+        study_name=f"{name}-{feature_set}-{datetime.now():%Y%m%d-%H%M%S}",
         storage=s.optuna_storage,
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=s.seed),
     )
 
+    def build(params: dict):
+        return model.build_pipeline(params, features)
+
     def objective(trial: optuna.Trial) -> float:
         params = model.suggest(trial)
-        scores = cross_val_score(model.build_pipeline(params), X, y, cv=split.folds, scoring=s.metric)
+        scores = cross_val_score(build(params), X, y, cv=split.folds, scoring=s.metric)
         trial.set_user_attr("params", params)
         trial.set_user_attr("cv_scores", scores.tolist())
-        with mlflow.start_run(run_name=f"{name}/trial-{trial.number:03d}", nested=True):
+        with mlflow.start_run(run_name=f"{run_name}/trial-{trial.number:03d}", nested=True):
             mlflow.log_params(params)
             mlflow.log_metrics({"cv_mean": scores.mean(), "cv_std": scores.std()})
             for fold, score in enumerate(scores):
                 mlflow.log_metric("cv_fold", score, step=fold)
         return scores.mean()
 
-    tags = {"model": name, "data_digest": digest(df), "optuna_study": study.study_name}
-    with mlflow.start_run(run_name=name, tags=tags) as parent:
+    tags = {
+        "model": name,
+        "feature_set": feature_set,
+        "evaluation_key": evaluation_key(df),
+        "data_digest": digest(df),
+        "optuna_study": study.study_name,
+    }
+    with mlflow.start_run(run_name=run_name, tags=tags) as parent:
         mlflow.log_input(mlflow.data.from_pandas(df, source=s.data_uri, targets=s.target, name="raw"), context="training")
         mlflow.log_params(s.model_dump(include={"seed", "test_size", "n_splits", "n_repeats", "metric"}))
-        mlflow.log_params({"complexity": model.COMPLEXITY, "n_trials": n_trials or s.n_trials})
+        mlflow.log_params({
+            "complexity": model.COMPLEXITY,
+            "n_trials": n_trials or s.n_trials,
+            "feature_set": feature_set,
+            "input_columns": ",".join(features.columns),
+        })
         mlflow.log_dict(
             {"train": split.train, "test": split.test, "folds": split.folds, "rescore_folds": split.rescore_folds},
             "split.json",
         )
 
         study.optimize(objective, n_trials=n_trials or s.n_trials)
-        ranking = rescore(study, model, X, y, split.rescore_folds, s.metric, s.rescore_top_k)
+        ranking = rescore(study, build, X, y, split.rescore_folds, s.metric, s.rescore_top_k)
         mlflow.log_table(ranking, artifact_file="rescore.json")
         chosen = ranking.iloc[0]
         best = study.trials[int(chosen["trial"])]
@@ -79,8 +96,8 @@ def run_study(name: str, n_trials: int | None = None) -> str:
             "optimism": study.best_value - ranking.loc[ranking["trial"] == study.best_trial.number, "rescore_mean"].item(),
         }
 
-        with mlflow.start_run(run_name=f"{name}/final", nested=True):
-            pipeline = model.build_pipeline(best.user_attrs["params"])
+        with mlflow.start_run(run_name=f"{run_name}/final", nested=True):
+            pipeline = build(best.user_attrs["params"])
             start = time.perf_counter()
             pipeline.fit(X_train, y_train)
             fit_seconds = time.perf_counter() - start
@@ -90,7 +107,7 @@ def run_study(name: str, n_trials: int | None = None) -> str:
             _log_report(pipeline, X_test, y_test)
             info = mlflow.sklearn.log_model(
                 pipeline,
-                name=name,
+                name=f"{name}-{feature_set}",
                 serialization_format="cloudpickle",
                 signature=infer_signature(X_test, pipeline.predict(X_test)),
             )
@@ -103,12 +120,12 @@ def run_study(name: str, n_trials: int | None = None) -> str:
     return parent.info.run_id
 
 
-def rescore(study: optuna.Study, model, X, y, folds, metric: str, top_k: int) -> pd.DataFrame:
+def rescore(study: optuna.Study, build, X, y, folds, metric: str, top_k: int) -> pd.DataFrame:
     """Re-measure the top trials on folds that played no part in choosing them; best re-score first."""
     complete = study.get_trials(deepcopy=False, states=[optuna.trial.TrialState.COMPLETE])
     rows = []
     for trial in sorted(complete, key=lambda t: t.value, reverse=True)[:top_k]:
-        scores = cross_val_score(model.build_pipeline(trial.user_attrs["params"]), X, y, cv=folds, scoring=metric)
+        scores = cross_val_score(build(trial.user_attrs["params"]), X, y, cv=folds, scoring=metric)
         rows.append({
             "trial": trial.number,
             "search_mean": trial.value,
@@ -132,10 +149,11 @@ def _log_report(pipeline, X, y) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Tune models with Optuna and log them to MLflow")
     parser.add_argument("models", nargs="*", default=list(MODELS), choices=list(MODELS))
+    parser.add_argument("--features", default=DEFAULT_FEATURE_SET, choices=list(FEATURE_SETS))
     parser.add_argument("--trials", type=int)
     args = parser.parse_args()
     for name in args.models:
-        print(name, run_study(name, args.trials))
+        print(name, args.features, run_study(name, args.features, args.trials))
 
 
 if __name__ == "__main__":

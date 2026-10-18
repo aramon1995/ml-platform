@@ -24,9 +24,9 @@ make infer            # predice con el modelo de producción y guarda en Postgre
 
 | Servicio | URL | Credenciales |
 | --- | --- | --- |
-| Prefect (lanzar y seguir flows) | <http://localhost:4200> | |
-| MLflow (experimentos y modelos) | <http://localhost:5000> | |
-| Consola S3 (datos y artefactos) | <http://localhost:9101/rustfs/console> | `s3admin` / `s3admin12345` |
+| Prefect (lanzar y seguir flows) | `http://localhost:4200` | |
+| MLflow (experimentos y modelos) | `http://localhost:5000` | |
+| Consola S3 (datos y artefactos) | `http://localhost:9101/rustfs/console` | `s3admin` / `s3admin12345` |
 | Postgres | `localhost:5432` | `mlp` / `mlp`; bases `app`, `mlflow`, `optuna`, `prefect` |
 
 ## Comandos
@@ -35,8 +35,9 @@ make infer            # predice con el modelo de producción y guarda en Postgre
 make start                               # servicios + dataset en S3 (idempotente)
 make seed                                # vuelve a subir data.csv a s3://data/raw/data.csv
 make train MODELS=svm,logreg TRIALS=10   # estudios de Optuna; sin MODELS entrena todos, sin TRIALS usa 30
+make train FEATURES=with_flat_columns    # mismo entrenamiento con otro feature set (por defecto eda_minimal)
 make select                              # champion por modelo y modelo de producción
-make train-select                        # train + select en un paso
+make train-select                        # train + select en un paso (admite los mismos parametros que train)
 make infer                               # lote por defecto: el split de test
 make infer INPUT=s3://data/inference/lote.csv
 make eda                                 # re-ejecuta lab/eda.ipynb (desde el host)
@@ -47,13 +48,13 @@ make clean                               # para y borra los volúmenes (datos, r
 
 Los comandos `train`, `select` e `infer` lanzan el deployment de Prefect y esperan a que termine. También se pueden lanzar desde la UI de Prefect (*Deployments*). El reentrenamiento diario (`train-and-select`, 03:00) está definido pero desactivado: se activa desde la UI.
 
-Para subir un lote de inferencia: `uv run python -m mlplatform.storage upload lote.csv s3://data/inference/lote.csv`. El lote tiene las mismas columnas que `data.csv`; `Target` se ignora si está.
+Para subir un lote de inferencia: `uv run python -m mlplatform.storage upload lote.csv s3://data/inference/lote.csv`. El lote solo necesita las columnas que usa el modelo de producción; cualquier otra (incluida `Target`) se ignora.
 
 ## Flujo
 
 ```plain
 lab/eda.ipynb          EDA sobre train → decisiones de features
-features.py            features elegidas y preprocesado por familia de modelo
+features.py            feature sets con nombre (inmutables) y su preprocesado
 models/<modelo>.py     pipeline (preprocesado + estimador) + espacio de búsqueda
 tuning.py              Optuna con split y folds fijos → MLflow
 selection.py           champion por modelo → producción (regla 1-SE + complejidad)
@@ -61,7 +62,15 @@ inference.py           lote de S3 → classifier@production → Postgres
 flows.py               flows de Prefect sobre las piezas anteriores
 ```
 
-El núcleo es Python plano y no depende de Prefect: cada paso se puede ejecutar con `python -m mlplatform.tuning svm`, `python -m mlplatform.selection` o `python -m mlplatform.inference`.
+El núcleo es Python plano y no depende de Prefect. Para pruebas rápidas desde el host (con los servicios levantados):
+
+```bash
+uv run --env-file .env python -m mlplatform.tuning svm --features reduced_set --trials 5
+uv run --env-file .env python -m mlplatform.selection
+uv run --env-file .env python -m mlplatform.inference [s3://data/inference/lote.csv]
+```
+
+`--env-file .env` es necesario para la inferencia. Lo que pueda acabar en producción conviene entrenarlo por Prefect, que usa el mismo código que luego sirve el modelo.
 
 ### 1. EDA
 
@@ -71,9 +80,16 @@ Figuras, tablas y conclusiones se registran en MLflow (experimento `eda`). La se
 
 ### 2. Features
 
-Resultado del analisis exploratorio, si detectamos data skews o decremento del modelo de produccion con el tiempo, debemos rehacer el analisis y sacar nuevas conclusiones si es necesario y aplicarlos en `features.py` para el entrenamiento.
+Resultado del analisis exploratorio, si detectamos data skews o decremento del modelo de produccion con el tiempo, debemos rehacer el analisis y sacar nuevas conclusiones si es necesario y aplicarlas en `features.py` como un feature set nuevo para el entrenamiento.
 
-Solo sobreviven tres entradas:
+Un **feature set** es una lista de columnas con nombre y su tratamiento. Es **inmutable**: una vez se ha entrenado un modelo con él, no se edita; para probar otro preprocesado se añade uno nuevo. Es una regla de trabajo, no una comprobación automática: editar un feature set ya usado cambiaría en silencio los modelos que dependen de él.
+
+| Feature set | Columnas |
+| --- | --- |
+| `eda_minimal` (por defecto) | Decisiones del EDA: mes, `F22`, `F17` |
+| `with_flat_columns` | `eda_minimal` + las 8 columnas planas que el EDA descartó (F3, F6, F9, F12, F18, F21, F24, F27) |
+
+Tratamiento en `eda_minimal`:
 
 | Feature | Tratamiento | Por qué |
 | --- | --- | --- |
@@ -81,7 +97,11 @@ Solo sobreviven tres entradas:
 | `F22` | Imputación por mediana | Única numérica con señal fuerte (MI 0,76) |
 | `F17` | Mediana + indicador de nulo | 90 % nulos; el valor informa cuando está |
 
-Hay dos preprocesadores: `linear_preprocessor()` escala las numéricas (logreg, SVM, MLP) y `tree_preprocessor()` no (random forest, XGBoost).
+Cada feature set genera su preprocesador con `preprocessor(scale=...)`: los modelos lineales, SVM y MLP escalan las numéricas; random forest y XGBoost no.
+
+Un modelo se entrena **solo con las columnas de su feature set**. En inferencia, las columnas extra o ausentes que el modelo no usa se ignoran; si falta una que sí usa, la predicción falla con un error explícito en lugar de inventar valores.
+
+**Añadir un feature set**: añadir un `FeatureSet` con nombre descriptivo a `FEATURE_SETS` en `features.py`.
 
 ### 3. Modelos
 
@@ -92,7 +112,7 @@ NAME = "svm"
 COMPLEXITY = 2                            # orden de simplicidad y explicabilidad
 
 def suggest(trial) -> dict: ...           # espacio de búsqueda de Optuna
-def build_pipeline(params) -> Pipeline: ... # preprocesado de su familia + estimador
+def build_pipeline(params, features) -> Pipeline: ...  # preprocesado del feature set + estimador
 ```
 
 | Modelo | Complejidad | Notas |
@@ -107,7 +127,7 @@ def build_pipeline(params) -> Pipeline: ... # preprocesado de su familia + estim
 
 ### 4. Tuning
 
-`tuning.run_study(modelo)` es igual para todos los modelos:
+`tuning.run_study(modelo, feature_set)` es igual para todos los modelos:
 
 1. Lee el dataset de S3 y genera el split (80/20 estratificado) y los folds (5×2 estratificados repetidos). Son deterministas: todos los modelos usan exactamente los mismos índices.
 2. Optuna (TPE) maximiza el F1 macro medio en CV sobre train.
@@ -116,7 +136,9 @@ def build_pipeline(params) -> Pipeline: ... # preprocesado de su familia + estim
 
 ### 5. Selección
 
-1. **Champion por modelo**: su último estudio, registrado como `<modelo>@champion`.
+Solo compiten los estudios con la **clave de evaluación** actual: mismos datos, mismo split y folds (seed, tamaños) y misma métrica. El feature set y el código no forman parte de la clave: son lo que se compara. Si cambian los datos o el split, hay que reentrenar todos los modelos antes de seleccionar.
+
+1. **Champion por modelo**: su estudio con mejor CV, sea cual sea el feature set, registrado como `<modelo>@champion`.
 2. **Producción**, regla de 1 error estándar: se toma el champion con mejor CV y se consideran empatados todos los que estén a menos de 1 SE de él. De ellos gana el de menor complejidad, y luego el de mayor CV.
 3. **Control en test**: se descarta un candidato que quede más de `TEST_TOLERANCE` (0,05) por debajo del mejor test. El test no elige, solo controla: con 100 filas, un error equivale a un punto.
 4. El ganador se registra como `classifier@production`. Volver a ejecutar la selección no crea versiones si nada cambió.
@@ -127,11 +149,11 @@ def build_pipeline(params) -> Pipeline: ... # preprocesado de su familia + estim
 
 | Columna | Contenido |
 | --- | --- |
-| `prediction_id`, `timestamp`, `predicted_value` | Lo que pide el reto |
+| `prediction_id`, `timestamp`, `predicted_value` | Base |
 | `probabilities` | Probabilidad por clase (JSONB) |
-| `model_name`, `model_version`, `model_family`, `run_id` | Qué modelo predijo |
+| `model_name`, `model_version`, `model_family`, `feature_set`, `run_id` | Qué modelo predijo |
 | `batch_id`, `input_uri` | De qué lote viene |
-| `features` | Fila de entrada original (JSONB) |
+| `features` | Valores de entrada que usó el modelo (JSONB) |
 
 ```bash
 docker compose exec postgres psql -U mlp -d app -c "select prediction_id, timestamp, predicted_value, model_family, model_version from predictions limit 5"
@@ -144,8 +166,8 @@ docker compose exec postgres psql -U mlp -d app -c "select prediction_id, timest
 | Experimento | Contenido |
 | --- | --- |
 | `eda` | Figuras, tablas y `conclusions.json` del notebook |
-| `tuning` | Un run padre por modelo (`svm`) con trials anidados (`svm/trial-012`) y el reentrenamiento final (`svm/final`) |
-| `selection` | Un run por selección (`production-xgboost`) con la tabla de candidatos y el umbral 1-SE |
+| `tuning` | Un run padre por modelo y feature set (`svm/eda_minimal`) con trials anidados (`svm/eda_minimal/trial-012`) y el reentrenamiento final (`svm/eda_minimal/final`) |
+| `selection` | Un run por selección (`production-svm`) con los champions, todos los estudios comparables y el umbral 1-SE |
 | `inference` | Un run por lote (`batch-1a2b3c4d`) con recuento por clase y confianza media |
 
 En `tuning`, la tabla de runs padre compara de un vistazo `cv_mean`, `cv_se`, `test_f1_macro`, `fit_seconds` y `complexity`. `search_cv_mean` es la puntuación del trial en la búsqueda y `optimism` cuánto pierde el mejor trial de la búsqueda al re-evaluarlo: mide el sesgo de selección. La tabla `rescore.json` del padre muestra la re-evaluación de los mejores trials. Cada run `final` incluye matriz de confusión, reporte por clase, importancia por permutación y el modelo; el MLP añade su curva de pérdida. El padre incluye los gráficos de Optuna y los índices del split.
@@ -177,7 +199,7 @@ Nada se guarda en disco local. MLflow solo descarga los modelos a un directorio 
 | `RESCORE_TOP_K` | 5 | Mejores trials que se re-evalúan con folds nuevos |
 | `TEST_TOLERANCE` | 0,05 | Control en test de la selección |
 
-Los hiperparámetros no van aquí: viven en cada módulo de modelo. Cambiar `METRIC`, `SEED` o la validación requiere volver a entrenar todos los modelos para que la comparación siga siendo justa.
+Los hiperparámetros no van aquí: viven en cada módulo de modelo. `DATA_URI`, `TARGET`, `SEED`, la validación y `METRIC` forman la clave de evaluación: cambiarlos (o cambiar el dataset) obliga a reentrenar todos los modelos.
 
 ## Estructura
 
@@ -199,7 +221,6 @@ Los hiperparámetros no van aquí: viven en cada módulo de modelo. Cambiar `MET
 - **≈6 % de filas fuera de patrón**: `F22` es la única pista para ellas.
 - **Re-evaluación con los mismos datos**: Se evaluan los modelos con folds nuevos que reparten las mismas 400 filas de otra forma. Eliminan la suerte de la partición, no la de la muestra; para eso sigue estando el test.
 - **Modelo no residente**: la inferencia carga el modelo una vez por lote. Para esto, se puede montar un FastAPI dentro de un container y utilizarlo como servicio de inferencia, tendriamos que tener tambien un endpoint de update que se lance desde prefect como ultimo paso del flujo de train-select al actualizar el champion.
-- **Ejecución desde el host**: el proxy de artefactos de MLflow devuelve URLs prefirmadas con el host interno `s3:9000`, así que el host no puede descargar modelos. Entrenamiento e inferencia corren en contenedores; desde el host solo se usan el notebook y los tests. Aun asi podemos hacer la descarga manual entrando desde el panel de rustfs, pero no es necesario en ningun momento para correr la plataforma.
 - **Entrenamiento secuencial**: los estudios se ejecutan uno tras otro. Se pueden hacer como flujos paralelos tipo map en el entrenamiento y reduce en la seleccion, esto seria mas rapido pero consumiria mas recursos, para pruebas en local mejor secuencial
 
 ## Escalado a cloud

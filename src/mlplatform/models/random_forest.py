@@ -3,7 +3,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 
 from mlplatform.config import get_settings
-from mlplatform.features import tree_preprocessor
+from mlplatform.features import FeatureSet
 
 NAME = "random_forest"
 COMPLEXITY = 3
@@ -17,6 +17,6 @@ def suggest(trial: Trial) -> dict:
     }
 
 
-def build_pipeline(params: dict) -> Pipeline:
+def build_pipeline(params: dict, features: FeatureSet) -> Pipeline:
     model = RandomForestClassifier(class_weight="balanced", random_state=get_settings().seed, **params)
-    return Pipeline([("prep", tree_preprocessor()), ("model", model)])
+    return Pipeline([("prep", features.preprocessor(scale=False)), ("model", model)])

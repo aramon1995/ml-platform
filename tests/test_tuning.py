@@ -3,6 +3,7 @@ import optuna
 import pandas as pd
 
 from mlplatform.data import make_split
+from mlplatform.features import FEATURE_SETS
 from mlplatform.models import logreg
 from mlplatform.tuning import rescore
 
@@ -24,7 +25,7 @@ def test_rescore_ranks_top_trials_on_fresh_folds():
             value=value,
             user_attrs={"params": {"C": c}},
         ))
-    ranking = rescore(study, logreg, X, y, split.rescore_folds, "f1_macro", top_k=2)
+    ranking = rescore(study, lambda p: logreg.build_pipeline(p, FEATURE_SETS["eda_minimal"]), X, y, split.rescore_folds, "f1_macro", top_k=2)
     assert set(ranking["trial"]) == {0, 1}
     assert ranking["rescore_mean"].is_monotonic_decreasing
     assert ranking.set_index("trial").loc[0, "search_mean"] == 0.9

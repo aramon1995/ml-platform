@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from mlplatform.inference import predict
+from mlplatform.features import FEATURE_SETS
 from mlplatform.models import logreg
 
 
@@ -14,7 +15,7 @@ def fitted():
         "F22": np.where(y == "A", 10.0, 20.0),
         "F17": np.nan,
     })
-    return logreg.build_pipeline({"C": 1.0}).fit(X, y), X
+    return logreg.build_pipeline({"C": 1.0}, FEATURE_SETS["eda_minimal"]).fit(X, y), X
 
 
 def test_predict_returns_label_probabilities_and_raw_features(fitted):
@@ -26,7 +27,9 @@ def test_predict_returns_label_probabilities_and_raw_features(fitted):
     assert out["features"][0]["F17"] is None and out["features"][39]["F17"] == 1.5
 
 
-def test_predict_rejects_batches_missing_columns(fitted):
+def test_predict_ignores_extra_columns_and_rejects_missing_used_ones(fitted):
     model, X = fitted
+    out = predict(model, X.assign(F99="new column", F1="unused"))
+    assert len(out) == len(X) and set(out["features"][0]) == {"Timestamp", "F22", "F17"}
     with pytest.raises(ValueError, match="F22"):
         predict(model, X.drop(columns=["F22"]))

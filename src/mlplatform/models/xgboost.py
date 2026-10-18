@@ -5,7 +5,7 @@ from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
 
 from mlplatform.config import get_settings
-from mlplatform.features import tree_preprocessor
+from mlplatform.features import FeatureSet
 
 NAME = "xgboost"
 COMPLEXITY = 3
@@ -47,6 +47,6 @@ def suggest(trial: Trial) -> dict:
     }
 
 
-def build_pipeline(params: dict) -> Pipeline:
+def build_pipeline(params: dict, features: FeatureSet) -> Pipeline:
     model = LabelEncodedXGB(n_jobs=1, random_state=get_settings().seed, **params)
-    return Pipeline([("prep", tree_preprocessor()), ("model", model)])
+    return Pipeline([("prep", features.preprocessor(scale=False)), ("model", model)])

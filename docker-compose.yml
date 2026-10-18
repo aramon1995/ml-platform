@@ -1,6 +1,6 @@
 x-app: &app
-  build: .
   image: mlplatform:latest
+  pull_policy: never
   env_file: [.env]
   environment:
     GIT_PYTHON_REFRESH: quiet
@@ -43,6 +43,7 @@ services:
 
   s3-init:
     <<: *app
+    build: .
     command: python -m mlplatform.storage create-buckets
     depends_on: [s3]
     restart: "no"
