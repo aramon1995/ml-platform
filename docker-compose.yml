@@ -49,6 +49,14 @@ services:
     depends_on: [s3]
     restart: "no"
 
+  db-init:
+    <<: *app
+    command: python -m mlplatform.db
+    depends_on:
+      postgres: {condition: service_healthy}
+      s3-init: {condition: service_completed_successfully}
+    restart: "no"
+
   mlflow:
     <<: *app
     command: >
@@ -92,6 +100,7 @@ services:
     <<: *app
     command: python -m mlplatform.flows
     depends_on:
+      db-init: {condition: service_completed_successfully}
       prefect-server: {condition: service_healthy}
       mlflow: {condition: service_healthy}
 
@@ -100,6 +109,7 @@ services:
     command: uvicorn mlplatform.api:app --host 0.0.0.0 --port 8000
     ports: ["8000:8000"]
     depends_on:
+      db-init: {condition: service_completed_successfully}
       mlflow: {condition: service_healthy}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health')"]

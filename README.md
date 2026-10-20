@@ -42,6 +42,10 @@ make train-select                        # train + select en un paso (admite los
 make infer                               # lote por defecto: el split de test
 make infer INPUT=s3://data/inference/lote.csv
 make infer ROWS='[{"Timestamp": "2025-04-10 12:00:00", "F22": 18.5, "F17": null}]'   # filas sueltas, sin S3
+make monitor                             # chequeos de drift, calidad y rendimiento del modelo de producción
+make monitor INPUT=s3://data/inference/lote.csv   # ... solo sobre las predicciones de ese fichero
+make scenario NAME=02_numeric_drift      # escenario de data-monitoring/: sube, predice, etiqueta y monitoriza
+make labels INPUT=s3://data/labels/x.csv # carga etiquetas reales (prediction_id, actual_value, o fichero con Target)
 make eda                                 # re-ejecuta lab/eda.ipynb (desde el host)
 make test                                # tests unitarios
 make stop                                # para los servicios
@@ -58,13 +62,18 @@ Para predecir unas pocas filas sin subir un CSV, se pasan en JSON con `ROWS` (ta
 
 ![Arquitectura de despliegue](diagrams/assets/platform-architecture.png)
 
-Servicios de docker compose y cómo se comunican: Prefect ejecuta los flows, MLflow guarda runs y modelos (metadatos en Postgres, artefactos en S3), la API sirve el modelo de producción en memoria y todas las predicciones acaban en Postgres.
+Servicios de docker compose y cómo se comunican: Prefect ejecuta los flows (entrenamiento, selección, inferencia y monitorización), MLflow guarda runs y modelos (metadatos en Postgres, artefactos en S3), la API sirve el modelo de producción en memoria, todas las predicciones acaban en Postgres (con el esquema que crea `db-init`) y las alertas de monitorización salen por la automatización de Prefect.
 
 ![Flujo de datos](diagrams/assets/ml-dataflow.png)
 
 Recorrido de los datos desde el dataset en S3 hasta las predicciones: entrenamiento con Optuna, tracking en MLflow, selección del modelo de producción e inferencia por lotes o por la API.
 
-Las versiones interactivas (zoom, búsqueda, tema oscuro, exportación a SVG/PNG) están en [`diagrams/platform-architecture.html`](diagrams/platform-architecture.html) y [`diagrams/ml-dataflow.html`](diagrams/ml-dataflow.html); se abren directamente en el navegador. Se generan con Archify.
+![Flujo de monitorización](diagrams/assets/ml-monitoring.png)
+
+Monitorización en producción: la ventana de predicciones (con sus etiquetas, si las hay) se compara con el perfil de referencia del modelo; cada chequeo se guarda en Postgres y MLflow, y las alertas se convierten en eventos de Prefect.
+
+Las versiones interactivas (zoom, búsqueda, tema oscuro, exportación a SVG/PNG) están en [`diagrams/platform-architecture.html`](diagrams/platform-architecture.html), [`diagrams/ml-dataflow.html`](diagrams/ml-dataflow.html) y [`diagrams/ml-monitoring.html`](diagrams/ml-monitoring.html); se abren directamente en el navegador. Se generan con Archify.
+
 ## Flujo
 
 ```plain
@@ -120,6 +129,21 @@ flowchart TD
     logm --> key
     reload --> api
     prod --> loadp
+
+    subgraph MONITOR["Monitorización · flow monitor (diario)"]
+        labels["make labels<br/>CSV en S3 → ground_truth"] --> window
+        window["Ventana: predicciones recientes<br/>de la versión de producción"] --> enough{"¿Hay datos suficientes?"}
+        enough -- no --> nodata["insufficient_data"]
+        enough -- sí --> checks["Drift (PSI · KS) · meses raros · nulos<br/>prediction drift · confianza · rendimiento"]
+        checks --> status{"¿Algún chequeo en alerta?"}
+        status -- no --> stored["Postgres monitoring + MLflow monitoring"]
+        status -- sí --> alert["Evento mlplatform.monitoring.alert<br/>+ automatización de Prefect"]
+        alert --> human["Revisión manual:<br/>¿incorporar etiquetas y reentrenar?"]
+    end
+
+    pg --> window
+    logm -.->|"reference_profile.json"| checks
+    human -.->|"make train-select"| load
 ```
 
 El núcleo es Python plano y no depende de Prefect. Para pruebas rápidas desde el host (con los servicios levantados):
@@ -251,6 +275,69 @@ curl -s -X POST localhost:8000/predict -H 'Content-Type: application/json' \
 
 El ejemplo vale para un modelo con `eda_minimal`. Las filas deben incluir las columnas que indica `/health` (`required_columns`); si falta alguna responde 422 con la lista. Si no hay modelo de producción, la API arranca igualmente y responde 503 hasta que una selección lo promueva. A diferencia de la inferencia batch, la API no registra cada petición en MLflow: solo en Postgres.
 
+### 8. Monitorización
+
+El flow `monitor` (diario a las 06:00 y con `make monitor`) compara las predicciones recientes del modelo de producción con su **perfil de referencia**. El perfil lo guarda cada entrenamiento junto al modelo (`reference_profile.json` en el run `final`): una muestra de cada numérica de train, las frecuencias de mes, las tasas de nulos, el reparto de clases y la confianza media en test, y el F1 de test. Al promover otro modelo la referencia cambia sola.
+
+La ventana son las predicciones de **la versión actual de producción** de las últimas `MONITOR_WINDOW_HOURS` (24). Cada chequeo mide cuánto peor está la ventana que la referencia (más es peor):
+
+| Chequeo | Cálculo | Aviso | Alerta |
+| --- | --- | --- | --- |
+| `psi.<columna>` | PSI sobre los deciles de train (y estadístico KS en el detalle) | ≥ 0,10 | ≥ 0,25 |
+| `psi.month` | PSI de la frecuencia de meses | ≥ 0,10 | ≥ 0,25 |
+| `rare_month_share` | % de filas con un mes que en train tiene < 1 % de frecuencia | ≥ 5 % | ≥ 15 % |
+| `null_increase.<columna>` | Tasa de nulos de la ventana menos la de train | +5 pt | +15 pt |
+| `prediction_psi` | PSI del reparto de clases predichas frente a test | ≥ 0,10 | ≥ 0,25 |
+| `confidence_drop` | Confianza media de test menos la de la ventana | 0,05 | 0,10 |
+| `performance_drop` | F1 de test menos el F1 de las predicciones ya etiquetadas | 0,03 | 0,05 |
+
+**Fórmulas.** Sea $W$ la ventana de predicciones y "ref" el perfil de referencia del modelo:
+
+- **PSI** (Population Stability Index), con $e_i$ la proporción de referencia y $a_i$ la de la ventana en cada bin o categoría $i$ (ambas acotadas abajo en $10^{-4}$ para evitar $\ln 0$):
+
+  $$\mathrm{PSI} = \sum_i (a_i - e_i)\,\ln\frac{a_i}{e_i}$$
+
+  En numéricas los bins son los deciles de la muestra de train (bordes en los percentiles 10…90). En el mes, los meses con frecuencia de referencia < 1 % se agrupan en una sola categoría. En `prediction_psi` las categorías son las clases predichas, frente a las predicciones del modelo sobre test. Orientación habitual: < 0,1 estable, 0,1–0,25 cambio moderado, > 0,25 cambio significativo.
+- **KS** (solo informativo, en el detalle de `psi.<columna>`): $D = \sup_x \lvert F_{\text{ref}}(x) - F_W(x) \rvert$, con `scipy.stats.ks_2samp`.
+- **Meses raros**, con $R = \{m : f_{\text{ref}}(m) < 0{,}01\}$ (incluye los meses no vistos):
+
+  $$\Delta_{\text{raros}} = \frac{\lvert \{x \in W : \text{mes}(x) \in R\} \rvert}{\lvert W \rvert} - \sum_{m \in R} f_{\text{ref}}(m)$$
+
+- **Nulos** en la columna $c$: $\Delta_{\text{nulos}}(c) = \dfrac{\text{nulos}_W(c)}{\lvert W \rvert} - r_{\text{ref}}(c)$
+- **Confianza**, con $p_k$ la probabilidad de la clase $k$: $\Delta_{\text{conf}} = \overline{\max_k p_k}^{\,\text{test}} - \overline{\max_k p_k}^{\,W}$
+- **Rendimiento**, con $M$ la métrica de `METRIC` sobre las predicciones etiquetadas de $W$: $\Delta_{\text{perf}} = M_{\text{test}} - M(y_W, \hat y_W)$
+
+Estado de cada chequeo con valor $v$: `alert` si $v \ge$ umbral de alerta, `warn` si $v \ge$ umbral de aviso, `ok` en otro caso.
+
+Con menos de `MONITOR_MIN_ROWS` (50) predicciones, o de 50 valores no nulos en una columna, el chequeo queda como `insufficient_data` en lugar de alertar: el PSI sobre pocos datos es ruido. `performance_drop` necesita al menos `MONITOR_MIN_LABELS` (30) etiquetas. Los umbrales son variables de `config.py`.
+
+**Etiquetas reales.** Un CSV con `prediction_id` y `actual_value` en S3 se carga con `make labels INPUT=s3://data/labels/<fichero>.csv` en la tabla `ground_truth`; una etiqueta nueva para el mismo id sustituye a la anterior y los ids desconocidos se ignoran. También se acepta el propio fichero de inferencia si trae la columna `Target`: sus etiquetas se asignan, en orden de filas, al último lote predicho desde ese fichero.
+
+**Monitorizar un fichero concreto.** `make monitor INPUT=s3://...` limita la ventana a las predicciones de ese fichero, útil para revisar un lote o para los escenarios de prueba.
+
+**Alertas.** Cada chequeo en `alert` emite un evento de Prefect `mlplatform.monitoring.alert` (UI → *Events*), el flow run se etiqueta con `alerts:N` y publica un artifact con la tabla de chequeos. El run termina `Completed`: detectar drift no es un fallo del proceso. La automatización `mlplatform-monitoring-alerts` ya reacciona al evento, pero su acción es `DoNothing`: para recibir avisos, crea un bloque de notificación (Slack, email o webhook) en la UI de Prefect y cambia la acción a *Send a notification*.
+
+**Qué hacer ante una alerta.** El drift no implica que el modelo haya empeorado: indica que hay que investigar (¿cambió el origen de datos?, ¿hace falta rehacer el EDA o un feature set nuevo?). Una caída de rendimiento confirmada se resuelve a mano: incorporar los datos etiquetados al dataset y lanzar `make train-select`. Nada se reentrena solo.
+
+**Escenarios de prueba** (`data-monitoring/`). Seis lotes de 100 filas construidos a partir del split de test (filas que el modelo no vio al entrenar), cada uno con su `Target`. `make scenario NAME=<nombre>` sube el fichero a `s3://data/monitoring/`, lo predice, carga sus etiquetas y monitoriza solo ese fichero. `uv run python data-monitoring/generate.py` los regenera. Resultados medidos con xgboost (`with_flat_columns`):
+
+| Escenario | Qué cambia | Alertas | Avisos |
+| --- | --- | --- | --- |
+| `01_normal` | Nada | — | `psi.F27` (ruido, ver limitaciones) |
+| `02_numeric_drift` | `F22` + 15 | `psi.F22` (3,41), `confidence_drop` (0,11), `performance_drop` (0,13) | `prediction_psi` |
+| `03_rare_months` | Meses → febrero/diciembre | `psi.month` (10,8), `rare_month_share` (+96,5 pt), `prediction_psi`, `confidence_drop` (0,20), `performance_drop` (0,42) | — |
+| `04_missing_values` | 40 % de nulos en `Timestamp` y `F22` | `null_increase.Timestamp` (+37,8 pt), `null_increase.F22` (+39 pt), `psi.month`, `performance_drop` (0,16) | `psi.F22`, `confidence_drop` |
+| `05_class_shift` | Solo filas de la clase C (julio) | `prediction_psi` (4,23), `psi.month`, `psi.F22`, `performance_drop` | `rare_month_share` |
+| `06_label_errors` | Mismas entradas que `01`, etiquetas cambiadas | `performance_drop` (0,97) | — |
+
+Cómo leerlos:
+- `06` es el único caso de **concept drift puro**: las entradas no cambian, así que solo lo detecta el rendimiento, y solo con etiquetas.
+- El resto son **data drift**, y suelen arrastrar el rendimiento porque el modelo depende del mes y de `F22`.
+- En `05`, la caída de rendimiento es en parte un artefacto: con una sola clase real en el lote, el F1 macro promedia clases ausentes. Un cambio de reparto de clases se lee en `prediction_psi`, no en el F1.
+- Con 100 filas, `F17` (90 % nulos) nunca llega a 50 valores no nulos y queda en `insufficient_data`.
+
+Resultados: tabla `monitoring` en Postgres (un registro por chequeo y ejecución), experimento `monitoring` en MLflow (métricas en el tiempo y `checks.json`) y artifacts del flow en Prefect.
+
 ## Dónde mirar los resultados
 
 ### MLflow
@@ -261,10 +348,22 @@ El ejemplo vale para un modelo con `eda_minimal`. Las filas deben incluir las co
 | `tuning` | Un run padre por modelo y feature set (`svm/eda_minimal`) con trials anidados (`svm/eda_minimal/trial-012`) y el reentrenamiento final (`svm/eda_minimal/final`) |
 | `selection` | Un run por selección (`production-svm`) con los champions, todos los estudios comparables y el umbral 1-SE |
 | `inference` | Un run por lote (`batch-1a2b3c4d`) con recuento por clase y confianza media |
+| `monitoring` | Un run por ejecución del monitor (`monitor-v3-20261019-0600`) con el valor de cada chequeo y tags `alerts` / `warnings` |
 
 En `tuning`, la tabla de runs padre compara de un vistazo `cv_mean`, `cv_se`, `test_f1_macro`, `fit_seconds` y `complexity`. `search_cv_mean` es la puntuación del trial en la búsqueda y `optimism` cuánto pierde el mejor trial de la búsqueda al re-evaluarlo: mide el sesgo de selección. La tabla `rescore.json` del padre muestra la re-evaluación de los mejores trials. Cada run `final` incluye matriz de confusión, reporte por clase, importancia por permutación y el modelo; el MLP añade su curva de pérdida. El padre incluye los gráficos de Optuna y los índices del split.
 
 Modelos registrados: `logreg`, `svm`, `random_forest`, `xgboost`, `mlp` (alias `champion`) y `classifier` (alias `production`).
+
+### Postgres
+
+| Base | Contenido | Quién crea las tablas |
+| --- | --- | --- |
+| `app` | `predictions`, `ground_truth`, `monitoring` | `src/mlplatform/db.py`, que ejecuta el servicio `db-init` en cada `make start` |
+| `mlflow` | Metadatos de MLflow | MLflow |
+| `optuna` | Estudios y trials | Optuna |
+| `prefect` | Estado de Prefect | Prefect |
+
+Las bases las crea `docker/postgres/init.sql` la primera vez que se crea el volumen. El esquema de `app` está en un único fichero, `db.py`: `python -m mlplatform.db` crea las tablas que falten. No altera tablas existentes, así que un cambio de columnas necesita una migración (o un `ALTER TABLE`). Para consultarlas: `docker compose exec postgres psql -U mlp -d app` (sin `-d app` se entra en la base `mlp`, que está vacía).
 
 ### S3
 
@@ -272,6 +371,8 @@ Modelos registrados: `logreg`, `svm`, `random_forest`, `xgboost`, `mlp` (alias `
 | --- | --- |
 | `s3://data/raw/data.csv` | Dataset original |
 | `s3://data/inference/` | Lotes de inferencia |
+| `s3://data/labels/` | Etiquetas reales para `make labels` |
+| `s3://data/monitoring/` | Escenarios de `data-monitoring/` subidos por `make scenario` |
 | `s3://mlflow/` | Todos los artefactos de MLflow, modelos incluidos |
 
 Nada se guarda en disco local. MLflow solo descarga los modelos a un directorio temporal al cargarlos.
@@ -290,18 +391,21 @@ Nada se guarda en disco local. MLflow solo descarga los modelos a un directorio 
 | `N_TRIALS` | 30 | Trials por modelo |
 | `RESCORE_TOP_K` | 5 | Mejores trials que se re-evalúan con folds nuevos |
 | `TEST_TOLERANCE` | 0,05 | Control en test de la selección |
+| `MONITOR_WINDOW_HOURS`, `MONITOR_MIN_ROWS`, `MONITOR_MIN_LABELS` | 24 / 50 / 30 | Ventana y mínimos del monitor |
+| `PSI_WARN`, `PSI_ALERT`, `RARE_MONTH_*`, `NULL_*`, `CONFIDENCE_*`, `PERFORMANCE_*` | ver `config.py` | Umbrales de aviso y alerta del monitor |
 
 Los hiperparámetros no van aquí: viven en cada módulo de modelo. `DATA_URI`, `TARGET`, `SEED`, la validación y `METRIC` forman la clave de evaluación: cambiarlos (o cambiar el dataset) obliga a reentrenar todos los modelos.
 
 ## Estructura
 
 ```plain
+├── data-monitoring/   escenarios de monitorización (CSV) y su generador
 ├── diagrams/          diagramas de arquitectura (.json fuente, .html interactivo, assets/ PNG)
 ├── lab/eda.ipynb
 ├── src/mlplatform/
 │   ├── config.py      data.py      features.py
 │   ├── models/        logreg.py  svm.py  random_forest.py  xgboost.py  mlp.py
-│   ├── tuning.py      selection.py   inference.py   api.py   reporting.py
+│   ├── tuning.py      selection.py   inference.py   api.py   monitoring.py   reporting.py
 │   ├── storage.py     (buckets y subida a S3)
 │   └── flows.py       (Prefect)
 ├── tests/
@@ -314,6 +418,7 @@ Los hiperparámetros no van aquí: viven en cada módulo de modelo. `DATA_URI`, 
 - **≈6 % de filas fuera de patrón**: `F22` es la única pista para ellas.
 - **Re-evaluación con los mismos datos**: Se evaluan los modelos con folds nuevos que reparten las mismas 400 filas de otra forma. Eliminan la suerte de la partición, no la de la muestra; para eso sigue estando el test.
 - **Inferencia batch sin modelo residente**: los flows de inferencia cargan el modelo una vez por lote. Para predicciones online de baja latencia está la API, que lo mantiene en memoria.
+- **Monitorización con ventanas pequeñas**: con 100 predicciones, las columnas planas (94 % de ceros, como `F27`) pueden dar avisos de PSI por ruido. Los mínimos de filas evitan alertas sobre muy pocos datos, pero conviene ventanas de varios cientos de predicciones.
 - **Entrenamiento secuencial**: los estudios se ejecutan uno tras otro. Se pueden hacer como flujos paralelos tipo map en el entrenamiento y reduce en la seleccion, esto seria mas rapido pero consumiria mas recursos, para pruebas en local mejor secuencial
 
 ## Escalado a cloud

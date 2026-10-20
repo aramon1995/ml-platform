@@ -8,33 +8,15 @@ import mlflow
 import pandas as pd
 from mlflow import MlflowClient
 from sklearn.pipeline import Pipeline
-from sqlalchemy import BigInteger, Column, DateTime, Integer, MetaData, String, Table, create_engine, func
-from sqlalchemy.dialects.postgresql import JSONB
 
 from mlplatform.config import get_settings
 from mlplatform.data import features_target, load_dataset, make_split, read_csv
+from mlplatform.db import engine, predictions
 from mlplatform.selection import PRODUCTION_MODEL
 
 EXPERIMENT = "inference"
 ALIAS = "production"
 
-metadata = MetaData()
-predictions = Table(
-    "predictions",
-    metadata,
-    Column("prediction_id", BigInteger, primary_key=True, autoincrement=True),
-    Column("timestamp", DateTime(timezone=True), server_default=func.now(), nullable=False),
-    Column("predicted_value", String, nullable=False),
-    Column("probabilities", JSONB, nullable=False),
-    Column("model_name", String, nullable=False),
-    Column("model_version", Integer, nullable=False),
-    Column("model_family", String, nullable=False),
-    Column("feature_set", String, nullable=False),
-    Column("run_id", String, nullable=False),
-    Column("batch_id", String, nullable=False),
-    Column("input_uri", String, nullable=False),
-    Column("features", JSONB, nullable=False),
-)
 
 
 def load_production():
@@ -85,9 +67,7 @@ def annotate(results: pd.DataFrame, version, batch_id: str, source: str) -> pd.D
 
 
 def store(results: pd.DataFrame) -> None:
-    engine = create_engine(get_settings().database_url)
-    metadata.create_all(engine)
-    with engine.begin() as conn:
+    with engine().begin() as conn:
         conn.execute(predictions.insert(), results.to_dict("records"))
 
 

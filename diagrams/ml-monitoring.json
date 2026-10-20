@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "Flujo de monitorización en producción",
+    "output": "diagrams/ml-monitoring.html",
+    "locale": "es",
+    "quality_profile": "showcase"
+  },
+  "stages": [
+    { "label": "Entradas" },
+    { "label": "Ventana" },
+    { "label": "Chequeos" },
+    { "label": "Registro" },
+    { "label": "Alertas" }
+  ],
+  "nodes": [
+    { "id": "profile", "type": "database", "label": "Referencia", "sublabel": "reference_profile.json", "stage": 0, "row": 0, "tag": "modelo de producción" },
+    { "id": "predictions", "type": "database", "label": "predictions", "sublabel": "postgres · app", "stage": 0, "row": 1 },
+    { "id": "labels", "type": "database", "label": "Etiquetas", "sublabel": "s3://data/labels", "stage": 0, "row": 2 },
+    { "id": "ground_truth", "type": "database", "label": "ground_truth", "sublabel": "postgres · app", "stage": 1, "row": 2 },
+    { "id": "window", "type": "backend", "label": "load_window", "sublabel": "versión prod · 24 h", "stage": 1, "row": 1 },
+    { "id": "evaluate", "type": "backend", "label": "evaluate", "sublabel": "PSI · KS · nulos · F1", "stage": 2, "row": 1 },
+    { "id": "monitoring_table", "type": "database", "label": "monitoring", "sublabel": "postgres · app", "stage": 3, "row": 0 },
+    { "id": "mlflow_monitoring", "type": "database", "label": "MLflow", "sublabel": "experimento monitoring", "stage": 3, "row": 1 },
+    { "id": "events", "type": "messagebus", "label": "Eventos Prefect", "sublabel": "monitoring.alert", "stage": 3, "row": 2 },
+    { "id": "automation", "type": "backend", "label": "Automatización", "sublabel": "Prefect · DoNothing", "stage": 4, "row": 2 },
+    { "id": "review", "type": "external", "label": "Revisión manual", "sublabel": "¿reentrenar?", "stage": 4, "row": 3 }
+  ],
+  "flows": [
+    { "from": "predictions", "to": "window", "label": "predicciones", "variant": "emphasis" },
+    { "from": "labels", "to": "ground_truth", "label": "make labels" },
+    { "from": "ground_truth", "to": "window", "label": "actual_value" },
+    { "from": "window", "to": "evaluate", "label": "ventana", "variant": "emphasis" },
+    { "from": "profile", "to": "evaluate", "label": "referencia" },
+    { "from": "evaluate", "to": "monitoring_table", "label": "un registro/chequeo" },
+    { "from": "evaluate", "to": "mlflow_monitoring", "label": "métricas" },
+    { "from": "evaluate", "to": "events", "label": "solo alertas", "variant": "dashed" },
+    { "from": "events", "to": "automation", "label": "dispara", "variant": "dashed" },
+    { "from": "automation", "to": "review", "label": "notificación" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Ventana", "items": ["Predicciones de la versión actual de producción en las últimas MONITOR_WINDOW_HOURS", "make monitor INPUT=s3://... la limita a un fichero", "Con menos de MONITOR_MIN_ROWS filas no se evalúa (insufficient_data)"] },
+    { "dot": "violet", "title": "Chequeos", "items": ["Drift: PSI por columna (KS informativo) y del mes", "Meses raros, aumento de nulos, prediction drift y caída de confianza", "Rendimiento: métrica sobre predicciones etiquetadas frente a la de test"] },
+    { "dot": "rose", "title": "Alertas sin acción automática", "items": ["El flow termina Completed y se etiqueta alerts:N", "La automatización notifica cuando se le enlaza un bloque (Slack, email, webhook)", "Reentrenar es manual: incorporar etiquetas al dataset y make train-select"] }
+  ]
+}

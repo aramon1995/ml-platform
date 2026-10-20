@@ -18,6 +18,22 @@ class Settings(BaseSettings):
     rescore_top_k: int = 5
     test_tolerance: float = 0.05
 
+    # monitoring: every check reports how much worse the window is than the reference
+    monitor_window_hours: int = 24
+    monitor_min_rows: int = 50
+    monitor_min_labels: int = 30
+    psi_warn: float = 0.10
+    psi_alert: float = 0.25
+    rare_month_freq: float = 0.01
+    rare_month_warn: float = 0.05
+    rare_month_alert: float = 0.15
+    null_warn: float = 0.05
+    null_alert: float = 0.15
+    confidence_warn: float = 0.05
+    confidence_alert: float = 0.10
+    performance_warn: float = 0.03
+    performance_alert: float = 0.05
+
     # infrastructure
     aws_endpoint_url: str = "http://localhost:9100"
     aws_access_key_id: str = "s3admin"

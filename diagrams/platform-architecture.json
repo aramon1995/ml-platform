@@ -15,7 +15,7 @@
       "sublabel": "make · uv · lab/eda.ipynb",
       "pos": [
         40,
-        40
+        220
       ],
       "size": [
         170,
@@ -29,7 +29,7 @@
       "sublabel": ":4200 · UI + API",
       "pos": [
         340,
-        40
+        220
       ],
       "size": [
         170,
@@ -40,10 +40,10 @@
       "id": "prefect_serve",
       "type": "backend",
       "label": "prefect-serve",
-      "sublabel": "train · select · batch-inference",
+      "sublabel": "train · select · infer · monitor",
       "pos": [
         660,
-        40
+        220
       ],
       "size": [
         190,
@@ -57,7 +57,7 @@
       "sublabel": "navegador · curl",
       "pos": [
         40,
-        250
+        430
       ],
       "size": [
         170,
@@ -71,7 +71,7 @@
       "sublabel": ":8000 · modelo en memoria",
       "pos": [
         340,
-        250
+        430
       ],
       "size": [
         170,
@@ -85,7 +85,7 @@
       "sublabel": ":5000 · tracking + registry",
       "pos": [
         660,
-        250
+        430
       ],
       "size": [
         190,
@@ -99,7 +99,7 @@
       "sublabel": "buckets data · mlflow",
       "pos": [
         1000,
-        250
+        430
       ],
       "size": [
         170,
@@ -113,7 +113,7 @@
       "sublabel": "buckets + data.csv",
       "pos": [
         1000,
-        460
+        640
       ],
       "size": [
         170,
@@ -127,10 +127,38 @@
       "sublabel": "mlflow · optuna · prefect · app",
       "pos": [
         660,
-        460
+        640
       ],
       "size": [
         190,
+        64
+      ]
+    },
+    {
+      "id": "db_init",
+      "type": "backend",
+      "label": "db-init",
+      "sublabel": "esquema de app (db.py)",
+      "pos": [
+        660,
+        820
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "alerts",
+      "type": "external",
+      "label": "Notificaciones",
+      "sublabel": "Slack · email · webhook",
+      "pos": [
+        340,
+        40
+      ],
+      "size": [
+        170,
         64
       ]
     }
@@ -146,7 +174,8 @@
         "mlflow",
         "s3",
         "seed",
-        "postgres"
+        "postgres",
+        "db_init"
       ],
       "pad": 22
     }
@@ -161,7 +190,7 @@
     {
       "from": "prefect_serve",
       "to": "prefect_server",
-      "label": "polling de runs"
+      "label": "polling · eventos"
     },
     {
       "from": "prefect_serve",
@@ -210,6 +239,17 @@
       "from": "seed",
       "to": "s3",
       "label": "buckets · data.csv"
+    },
+    {
+      "from": "db_init",
+      "to": "postgres",
+      "label": "crea tablas"
+    },
+    {
+      "from": "prefect_server",
+      "to": "alerts",
+      "label": "alertas de monitor",
+      "variant": "dashed"
     }
   ],
   "cards": [
@@ -217,26 +257,36 @@
       "dot": "cyan",
       "title": "Persistencia",
       "items": [
-        "postgres: bases mlflow, optuna, prefect y app (tabla predictions)",
-        "s3://data: dataset original y lotes de inferencia",
-        "s3://mlflow: artefactos y modelos, servidos por el proxy de MLflow",
-        "Volúmenes Docker pgdata y s3data"
+        "postgres: bases mlflow, optuna, prefect y app",
+        "app: predictions, ground_truth y monitoring, creadas por db-init",
+        "s3://data: dataset, lotes de inferencia, etiquetas y escenarios",
+        "s3://mlflow: artefactos y modelos, servidos por el proxy de MLflow"
       ]
     },
     {
       "dot": "violet",
       "title": "Flows en prefect-serve",
       "items": [
-        "train: estudios de Optuna (trials en la base optuna) y modelos en MLflow",
-        "select: registra champions y classifier@production, luego POST /reload",
-        "batch-inference: predicciones a la tabla predictions"
+        "train y select: estudios de Optuna, champions y classifier@production; select llama a POST /reload",
+        "batch-inference: predicciones a la tabla predictions",
+        "monitor: drift, calidad y rendimiento sobre predictions + ground_truth",
+        "ingest-labels: etiquetas reales desde S3 a ground_truth"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Alertas",
+      "items": [
+        "monitor emite el evento mlplatform.monitoring.alert por cada chequeo en alerta",
+        "La automatización de prefect-server reacciona al evento",
+        "Su acción es DoNothing hasta enlazar un bloque de notificación"
       ]
     },
     {
       "dot": "emerald",
       "title": "Desde el host",
       "items": [
-        "make train / select / infer lanzan deployments",
+        "make train / select / infer / monitor lanzan deployments",
         "uv run python -m mlplatform.* ejecuta el mismo núcleo sin Prefect",
         "lab/eda.ipynb registra el EDA en MLflow"
       ]

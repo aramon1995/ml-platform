@@ -16,6 +16,7 @@ from mlplatform.config import get_settings
 from mlplatform.data import digest, evaluation_key, features_target, load_dataset, make_split
 from mlplatform.features import DEFAULT_FEATURE_SET, FEATURE_SETS
 from mlplatform.models import MODELS
+from mlplatform.monitoring import PROFILE, reference_profile
 
 EXPERIMENT = "tuning"
 REPORT_METRICS = ("accuracy", "balanced_accuracy")
@@ -88,13 +89,14 @@ def run_study(name: str, feature_set: str = DEFAULT_FEATURE_SET, n_trials: int |
         ranking = rescore(study, build, X, y, split.rescore_folds, s.metric, s.rescore_top_k)
         mlflow.log_table(ranking, artifact_file="rescore.json")
         chosen = ranking.iloc[0]
+        top_search = ranking.loc[ranking["search_mean"].idxmax()]  # robust to ties among the best trials
         best = study.trials[int(chosen["trial"])]
         cv = {
             "cv_mean": chosen["rescore_mean"],
             "cv_std": chosen["rescore_std"],
             "cv_se": chosen["rescore_se"],
             "search_cv_mean": chosen["search_mean"],
-            "optimism": study.best_value - ranking.loc[ranking["trial"] == study.best_trial.number, "rescore_mean"].item(),
+            "optimism": top_search["search_mean"] - top_search["rescore_mean"],
         }
 
         with mlflow.start_run(run_name=f"{run_name}/final", nested=True):
@@ -106,6 +108,9 @@ def run_study(name: str, feature_set: str = DEFAULT_FEATURE_SET, n_trials: int |
             mlflow.log_params(best.user_attrs["params"])
             mlflow.log_metrics(cv | test | {"fit_seconds": fit_seconds})
             _log_report(pipeline, X_test, y_test)
+            mlflow.log_dict(
+                reference_profile(X_train, pipeline, X_test, test[f"test_{s.metric}"], s.metric), PROFILE
+            )
             info = mlflow.sklearn.log_model(
                 pipeline,
                 name=f"{name}-{feature_set}",
